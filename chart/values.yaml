@@ -84,6 +84,6 @@ affinity: {}
 config:
   enabled: true
   secrets:
-    creds: gitea-assist-creds
+    gitea-creds: gitea-assist-creds
   data:
     gitea-api-url: "https://jeffw-git.apps.renci.org/api/v1"

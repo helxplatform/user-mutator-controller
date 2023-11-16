@@ -10,20 +10,18 @@ import (
 	"os"
 
 	giteaAPI "code.gitea.io/gitea/modules/structs"
+	"github.com/gorilla/mux"
+	v1 "k8s.io/api/admission/v1"
 	appsv1 "k8s.io/api/apps/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/cache"
 )
 
-type giteaAccess struct {
+type GiteaAccess struct {
 	URL      string
 	Username string
 	Password string
 }
 
-var access *giteaAccess
+var access *GiteaAccess
 var authToken string
 
 func init() {
@@ -45,28 +43,28 @@ func startHTTPServer() {
 	http.ListenAndServe(":8080", nil)
 }
 
-func getAccess() (*giteaAccess, error) {
-	var access *giteaAccess
+func getAccess() (*GiteaAccess, error) {
+	var access *GiteaAccess
 
-	username, err := os.ReadFile("/etc/user-mutator-secret/gitea-username")
+	username, err := os.ReadFile("/etc/user-mutator-secrets/gitea-username")
 	if err != nil {
 		log.Fatalf("Error reading username: %v", err)
 		return access, err
 	}
 
-	password, err := os.ReadFile("/etc/user-mutator-secret/gitea-password")
+	password, err := os.ReadFile("/etc/user-mutator-secrets/gitea-password")
 	if err != nil {
 		log.Fatalf("Error reading password: %v", err)
 		return access, err
 	}
 
-	url, err := os.ReadFile("/etc/user-mutator-config/gitea-api-url")
+	url, err := os.ReadFile("/etc/user-mutator-configs/gitea-api-url")
 	if err != nil {
 		log.Fatalf("Error reading password: %v", err)
 		return access, err
 	}
 
-	access = &giteaAccess{
+	access = &GiteaAccess{
 		URL:      string(url),
 		Username: string(username),
 		Password: string(password),
@@ -186,6 +184,7 @@ func getCurrentNamespace() (string, error) {
 	return string(namespace), nil
 }
 
+/*
 func setupInformer(stopCh chan struct{}, namespace string) cache.SharedInformer {
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -219,27 +218,82 @@ func setupInformer(stopCh chan struct{}, namespace string) cache.SharedInformer 
 
 	return informer
 }
+*/
 
-func main() {
-	// Start the HTTP server for liveness and readiness probes
-	go startHTTPServer()
+func processAdmissionReview(admissionReview v1.AdmissionReview) *v1.AdmissionResponse {
+	// Implement your logic here
+	// For example, always allow the request:
+	return &v1.AdmissionResponse{
+		Allowed: true,
+	}
+}
 
-	// Create the stop channel
-	stopCh := make(chan struct{})
-
-	// Detect the namespace in which this pod is running
-	currentNamespace, err := getCurrentNamespace()
+func handleAdmissionReview(w http.ResponseWriter, r *http.Request) {
+	// Read the body of the request
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		fmt.Printf("Error determining current namespace: %v\n", err)
-		os.Exit(1)
+		http.Error(w, fmt.Sprintf("could not read request body: %v", err), http.StatusBadRequest)
+		return
 	}
 
-	// Setup and start the informer
-	informer := setupInformer(stopCh, currentNamespace)
+	// Decode the AdmissionReview request
+	var admissionReviewReq v1.AdmissionReview
+	if err := json.Unmarshal(body, &admissionReviewReq); err != nil {
+		http.Error(w, fmt.Sprintf("could not unmarshal request: %v", err), http.StatusBadRequest)
+		return
+	}
 
-	// Start the informer
-	go informer.Run(stopCh)
+	// Process the request and prepare the response
+	// This is where your custom logic will go
+	admissionResponse := processAdmissionReview(admissionReviewReq)
 
-	// Keep the main function alive indefinitely
-	select {}
+	// Encode the response
+	admissionReviewResp := v1.AdmissionReview{
+		TypeMeta: admissionReviewReq.TypeMeta, // Use the same TypeMeta as the request
+		Response: admissionResponse,
+	}
+	resp, err := json.Marshal(admissionReviewResp)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("could not marshal response: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Write the response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(resp)
+}
+
+// readinessHandler checks the readiness of the service to handle requests.
+// In this implementation, it always indicates that the service is ready by
+// returning a 200 OK status. In more complex scenarios, this function could
+// check internal conditions before determining readiness.
+func readinessHandler(w http.ResponseWriter, r *http.Request) {
+	// Check conditions to determine if service is ready to handle requests.
+	// For simplicity, we're always returning 200 OK in this example.
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Ready"))
+}
+
+// livenessHandler checks the health of the service to ensure it's running and
+// operational. In this implementation, it always indicates that the service is
+// alive by returning a 200 OK status. In more advanced scenarios, this function
+// could check internal health metrics before determining liveness.
+func livenessHandler(w http.ResponseWriter, r *http.Request) {
+	// Check conditions to determine if service is alive and healthy.
+	// For simplicity, we're always returning 200 OK in this example.
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Alive"))
+}
+
+func main() {
+	r := mux.NewRouter()
+	r.HandleFunc("/mutate", handleAdmissionReview)
+	r.HandleFunc("/readiness", readinessHandler)
+	r.HandleFunc("/liveness", livenessHandler)
+	http.Handle("/", r)
+	log.Println("Server started on :8443")
+	if err := http.ListenAndServeTLS(":8443", "/etc/user-mutator-secrets/tls.crt", "/etc/user-mutator-secrets/tls.key", nil); err != nil {
+		log.Printf("Failed to start server: %v", err)
+	}
 }

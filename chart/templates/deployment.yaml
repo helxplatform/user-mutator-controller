@@ -50,15 +50,19 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/user-mutator-config
-            - name: secret
-              mountPath: /etc/user-mutator-secret
+            {{- range .Values.config.secrets }}
+            - name: {{ .name }}-secret-volume
+              mountPath: /etc/user-mutator-secrets/{{ .name }}
+            {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "user-mutator.fullname" . }}
-        - name: secret
+        {{- range .Values.config.secrets }}
+        - name: {{ .name }}-secret-volume
           secret:
-            secretName: {{ .Values.config.secrets.creds }}
+            secretName: {{ .name }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
