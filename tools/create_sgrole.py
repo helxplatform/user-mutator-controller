@@ -17,7 +17,7 @@ metadata:
 rules:
 - apiGroups: ["stackgres.io"]
   resources: ["sgclusters", "sgpoolconfigs", "sgpgconfigs", "sginstanceprofiles", "sgscripts"]
-  verbs: ["create", "get", "list", "watch", "delete"]
+  verbs: ["create", "get", "list", "watch", "delete", "patch"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

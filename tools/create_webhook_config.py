@@ -1,24 +1,86 @@
 #!/usr/bin/env python
 
 from kubernetes import client, config
+from kubernetes.client.rest import ApiException
 import base64
 import sys
 import argparse
 import os
 import yaml
+import time
 
-def get_kubernetes_ca_cert(api_instance, namespace="default"):
-    # Retrieve the default service account
-    service_account = api_instance.read_namespaced_service_account("default", namespace)
-    
-    # Find the token secret
-    for secret in service_account.secrets:
-        if secret.name.startswith("default-token"):
-            # Read the secret
-            token_secret = api_instance.read_namespaced_secret(secret.name, namespace)
-            # Return the CA cert
-            return base64.b64encode(token_secret.data['ca.crt'].encode('utf-8')).decode('utf-8')
-    raise RuntimeError("Unable to find default token with ca.crt")
+
+def create_cert_manager_certificate(api_instance,namespace, cert_name):
+    # Define the Certificate resource
+    certificate = {
+        "apiVersion": "cert-manager.io/v1",
+        "kind": "Certificate",
+        "metadata": {
+            "name": cert_name,
+            "namespace": namespace
+        },
+        "spec": {
+            "secretName": cert_name + "-tls",
+            "issuerRef": {
+                "name": "selfsigned",  # Assuming 'selfsigned' ClusterIssuer is used
+                "kind": "ClusterIssuer"
+            },
+            "dnsNames": ["user-mutator-service." + namespace + ".svc"]  # Adjust as needed
+        }
+    }
+
+    try:
+        api_instance.create_namespaced_custom_object(
+            group="cert-manager.io",
+            version="v1",
+            namespace=namespace,
+            plural="certificates",
+            body=certificate
+        )
+        print(f"Certificate '{cert_name}' created in namespace '{namespace}'")
+    except ApiException as e:
+        print(f"Error creating Certificate: {e}")
+
+def get_kubernetes_ca_cert(core_v1_api, namespace):
+    cert_name = "user-mutator-cert"
+
+    # Use CustomObjectsApi for cert-manager Certificate
+    custom_api_instance = client.CustomObjectsApi()
+
+    # Check if Certificate already exists
+    try:
+        custom_api_instance.get_namespaced_custom_object(
+            group="cert-manager.io",
+            version="v1",
+            namespace=namespace,
+            plural="certificates",
+            name=cert_name
+        )
+    except ApiException:
+        # Certificate doesn't exist, create it
+        create_cert_manager_certificate(custom_api_instance, namespace, cert_name)
+
+    # Wait for the Secret to be created by cert-manager with exponential backoff
+    secret_name = cert_name + "-tls"
+    max_wait_time = 300  # Maximum wait time in seconds (5 minutes)
+    attempt = 0
+    wait_time = 1  # Start with 1 second
+    start_time = time.time()
+
+    while time.time() < start_time + max_wait_time:
+        try:
+            secret = core_v1_api.read_namespaced_secret(secret_name, namespace)
+            ca_cert = secret.data['ca.crt']
+            return ca_cert
+        except ApiException:
+            time.sleep(wait_time)
+            attempt += 1
+            wait_time *= 2  # Double the wait time for the next attempt
+
+        if wait_time > 30:  # Cap the wait time at 30 seconds
+            wait_time = 30
+
+    raise RuntimeError(f"Secret '{secret_name}' not found in namespace '{namespace}' after waiting for 5 minutes.")
 
 def create_mutating_webhook_configuration(namespace, ca_cert):
     webhook_configuration = client.V1MutatingWebhookConfiguration(
@@ -56,9 +118,21 @@ def create_mutating_webhook_configuration(namespace, ca_cert):
 def represent_none(self, _):
     return self.represent_scalar('tag:yaml.org,2002:null', '')
 
+# Custom YAML dumper that skips null fields
+def yaml_dump_skip_nulls(data):
+    def skip_nulls(d):
+        return {k: v for k, v in d.items() if v is not None}
+
+    class SkipNullsYamlDumper(yaml.SafeDumper):
+        def represent_mapping(self, tag, mapping, flow_style=None):
+            return super().represent_mapping(tag, skip_nulls(mapping), flow_style)
+
+    return yaml.dump(data, Dumper=SkipNullsYamlDumper, default_flow_style=False)
+
 def save_to_yaml(webhook_configuration, filename):
     with open(filename, 'w') as file:
-        yaml.dump(webhook_configuration.to_dict(), file, default_flow_style=False)
+        yaml_content = yaml_dump_skip_nulls(webhook_configuration.to_dict())
+        file.write(yaml_content)
 
 def submit_to_cluster(webhook_configuration, api_instance):
     try:

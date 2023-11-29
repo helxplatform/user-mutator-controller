@@ -67,8 +67,11 @@ def submit_csr(api_instance,csr_file_path, webhook_name):
         metadata=client.V1ObjectMeta(name=webhook_name),
         spec=client.V1CertificateSigningRequestSpec(
             request=csr_base64,
-            usages=["digital signature", "key encipherment", "server auth"],
-            signer_name="kubernetes.io/kube-apiserver-client"  # Specify the appropriate signerName here
+            #usages=["client auth", "digital signature", "key encipherment"],
+            usages=["client auth", "server auth", "digital signature", "key encipherment"],
+            #signer_name="kubernetes.io/kube-apiserver-client"  # Specify the appropriate signerName here
+            #signer_name="kubernetes.io/kublet-serving"  # For webhook
+            signer_name="kubernetes.io/kube-apiserver"  # Specify the appropriate signerName here
         )
     )
 
@@ -84,6 +87,7 @@ def submit_csr(api_instance,csr_file_path, webhook_name):
 def get_signed_certificate(api_instance, csr_name):
     try:
         csr = api_instance.read_certificate_signing_request(csr_name)
+        print(csr)
         if csr.status.certificate:
             certificate = base64.b64decode(csr.status.certificate).decode('utf-8')
             print(f"Successfully retrieved signed certificate for CSR {csr_name}.")
