@@ -10,8 +10,9 @@ import yaml
 import time
 
 
-def create_cert_manager_certificate(api_instance,namespace, cert_name):
+def create_cert_manager_certificate(api_instance, namespace, cert_name):
     # Define the Certificate resource
+    full_dns_name = "user-mutator." + namespace + ".svc"
     certificate = {
         "apiVersion": "cert-manager.io/v1",
         "kind": "Certificate",
@@ -25,7 +26,8 @@ def create_cert_manager_certificate(api_instance,namespace, cert_name):
                 "name": "selfsigned",  # Assuming 'selfsigned' ClusterIssuer is used
                 "kind": "ClusterIssuer"
             },
-            "dnsNames": ["user-mutator-service." + namespace + ".svc"]  # Adjust as needed
+            "commonName": full_dns_name,  # Set the Common Name
+            "dnsNames": [full_dns_name]  # Set DNS names
         }
     }
 
@@ -94,7 +96,7 @@ def create_mutating_webhook_configuration(namespace, ca_cert):
                     namespace=namespace,
                     name="user-mutator",
                     path="/mutate",
-                    port=8000
+                    port=8443
                 ),
                 ca_bundle=ca_cert
             ),

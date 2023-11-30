@@ -19,7 +19,7 @@ test:
 # Build the Docker container
 docker-build: build
 	@echo "Building Docker container..."
-	docker build -t $(CONTAINER_NAME) .
+	docker build --platform linux/amd64 -t $(CONTAINER_NAME) .
 
 # Push the Docker container
 docker-push: docker-build

@@ -38,7 +38,7 @@ securityContext: {}
 
 service:
   type: ClusterIP
-  port: 8080
+  port: 8443
 
 ingress:
   enabled: false
@@ -84,6 +84,5 @@ affinity: {}
 config:
   enabled: true
   secrets:
-    gitea-creds: gitea-assist-creds
-  data:
-    gitea-api-url: "https://jeffw-git.apps.renci.org/api/v1"
+    gitea-creds: user-mutator-cert-tls
+  data: {}

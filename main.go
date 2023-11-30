@@ -25,7 +25,7 @@ var access *GiteaAccess
 var authToken string
 
 func init() {
-	access, _ = getAccess()
+	//access, _ = getAccess()
 	//authToken = createUserToken(access.URL, access.Username, access.Password, access.Username)
 }
 
@@ -223,6 +223,7 @@ func setupInformer(stopCh chan struct{}, namespace string) cache.SharedInformer 
 func processAdmissionReview(admissionReview v1.AdmissionReview) *v1.AdmissionResponse {
 	// Implement your logic here
 	// For example, always allow the request:
+	log.Printf("processing admission for %s:%s", admissionReview.Request.Namespace, admissionReview.Request.Name)
 	return &v1.AdmissionResponse{
 		Allowed: true,
 	}
@@ -230,6 +231,7 @@ func processAdmissionReview(admissionReview v1.AdmissionReview) *v1.AdmissionRes
 
 func handleAdmissionReview(w http.ResponseWriter, r *http.Request) {
 	// Read the body of the request
+	log.Printf("handle review")
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("could not read request body: %v", err), http.StatusBadRequest)
@@ -289,11 +291,11 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	r := mux.NewRouter()
 	r.HandleFunc("/mutate", handleAdmissionReview)
-	r.HandleFunc("/readiness", readinessHandler)
-	r.HandleFunc("/liveness", livenessHandler)
+	r.HandleFunc("/readyz", readinessHandler)
+	r.HandleFunc("/healthz", livenessHandler)
 	http.Handle("/", r)
 	log.Println("Server started on :8443")
-	if err := http.ListenAndServeTLS(":8443", "/etc/user-mutator-secrets/tls.crt", "/etc/user-mutator-secrets/tls.key", nil); err != nil {
+	if err := http.ListenAndServeTLS(":8443", "/etc/user-mutator-secrets/user-mutator-cert-tls/tls.crt", "/etc/user-mutator-secrets/user-mutator-cert-tls/tls.key", nil); err != nil {
 		log.Printf("Failed to start server: %v", err)
 	}
 }

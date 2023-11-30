@@ -40,28 +40,30 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8080
+              port: 8443
+              scheme: HTTPS
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8080
+              port: 8443
+              scheme: HTTPS
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
             - name: config
               mountPath: /etc/user-mutator-config
             {{- range .Values.config.secrets }}
-            - name: {{ .name }}-secret-volume
-              mountPath: /etc/user-mutator-secrets/{{ .name }}
+            - name: {{ . }}-secret-volume
+              mountPath: /etc/user-mutator-secrets/{{ . }}
             {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "user-mutator.fullname" . }}
         {{- range .Values.config.secrets }}
-        - name: {{ .name }}-secret-volume
+        - name: {{ . }}-secret-volume
           secret:
-            secretName: {{ .name }}
+            secretName: {{ . }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
