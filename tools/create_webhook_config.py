@@ -84,6 +84,8 @@ def get_kubernetes_ca_cert(core_v1_api, namespace):
 
 def create_mutating_webhook_configuration(namespace, ca_cert):
     webhook_configuration = client.V1MutatingWebhookConfiguration(
+        api_version="admissionregistration.k8s.io/v1",
+        kind="MutatingWebhookConfiguration",
         metadata=client.V1ObjectMeta(name="user-mutator-webhook"),
         webhooks=[client.V1MutatingWebhook(
             name="usermutator.k8s.io",
@@ -99,15 +101,15 @@ def create_mutating_webhook_configuration(namespace, ca_cert):
             failure_policy="Ignore",
             rules=[client.V1RuleWithOperations(
                 operations=["CREATE", "UPDATE"],
-                api_groups=["apps"],
-                api_versions=["v1"],
-                resources=["deployments"]
+                api_groups=["apps"],  # Adjust as needed
+                api_versions=["v1"],  # Adjust as needed
+                resources=["deployments"]  # Adjust as needed
             )],
             namespace_selector=client.V1LabelSelector(
-                match_labels={"name": namespace }
+                match_labels={"name": namespace}
             ),
             object_selector=client.V1LabelSelector(
-                match_labels={"executor": "tycho" }
+                match_labels={"executor": "tycho"}
             ),
             side_effects="None",
             admission_review_versions=["v1"]
@@ -130,8 +132,11 @@ def yaml_dump_skip_nulls(data):
     return yaml.dump(data, Dumper=SkipNullsYamlDumper, default_flow_style=False)
 
 def save_to_yaml(webhook_configuration, filename):
+    # Convert the Kubernetes object to a dictionary including its kind and metadata
+    webhook_config_dict = client.ApiClient().sanitize_for_serialization(webhook_configuration)
+
     with open(filename, 'w') as file:
-        yaml_content = yaml_dump_skip_nulls(webhook_configuration.to_dict())
+        yaml_content = yaml_dump_skip_nulls(webhook_config_dict)
         file.write(yaml_content)
 
 def submit_to_cluster(webhook_configuration, api_instance):
@@ -141,6 +146,16 @@ def submit_to_cluster(webhook_configuration, api_instance):
     except client.rest.ApiException as e:
         print(f"Exception when submitting MutatingWebhookConfiguration: {e}")
 
+def load_webhook_configuration_from_yaml(filename):
+    with open(filename, 'r') as file:
+        data = yaml.safe_load(file)
+        # Extract the relevant parts for V1MutatingWebhookConfiguration
+        webhook_config_data = {
+            'metadata': data.get('metadata'),
+            'webhooks': data.get('webhooks')
+        }
+        return client.V1MutatingWebhookConfiguration(**webhook_config_data)
+
 def main(namespace, submit):
     config.load_kube_config()
     core_v1_api = client.CoreV1Api()
@@ -149,9 +164,7 @@ def main(namespace, submit):
 
     if os.path.exists(yaml_filename):
         print(f"Using existing configuration from {yaml_filename}")
-        with open(yaml_filename, 'r') as file:
-            webhook_configuration_dict = yaml.safe_load(file)
-            webhook_configuration = client.V1MutatingWebhookConfiguration(**webhook_configuration_dict)
+        webhook_configuration = load_webhook_configuration_from_yaml(yaml_filename)
     else:
         webhook_configuration = create_mutating_webhook_configuration(namespace, ca_cert)
         save_to_yaml(webhook_configuration, yaml_filename)
