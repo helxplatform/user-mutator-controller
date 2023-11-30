@@ -103,12 +103,12 @@ def create_mutating_webhook_configuration(namespace, ca_cert):
             failure_policy="Ignore",
             rules=[client.V1RuleWithOperations(
                 operations=["CREATE", "UPDATE"],
-                api_groups=["apps"],  # Adjust as needed
-                api_versions=["v1"],  # Adjust as needed
+                api_groups=["apps"],
+                api_versions=["v1"],
                 resources=["deployments"]  # Adjust as needed
             )],
             namespace_selector=client.V1LabelSelector(
-                match_labels={"name": namespace}
+                match_labels={"kubernetes.io/metadata.name": namespace}
             ),
             object_selector=client.V1LabelSelector(
                 match_labels={"executor": "tycho"}
