@@ -362,9 +362,37 @@ func printVolumeMounts(volumeMounts []corev1.VolumeMount) {
 	}
 }
 
+func prettyPrintJSON(inputJSON string) (string, error) {
+	var buffer bytes.Buffer
+	err := json.Indent(&buffer, []byte(inputJSON), "", "    ")
+	if err != nil {
+		return "", err
+	}
+	return buffer.String(), nil
+}
+
+// printPatchOperations prints each JsonPatchOperation in the slice
+func printPatchOperations(operations []jsonpatch.JsonPatchOperation) {
+	for i, op := range operations {
+		opJSON, err := json.MarshalIndent(op, "", "    ")
+		if err != nil {
+			log.Printf("Failed to marshal operation %d: %s", i, err)
+			continue
+		}
+		fmt.Printf("Operation %d:\n%s\n", i, string(opJSON))
+	}
+}
+
 // calculatePatch creates a patch between the original deployment and its modified version with added volumes and mounts
-func calculatePatch(originalDeployment *appsv1.Deployment, volumes []corev1.Volume, volumeMounts []corev1.VolumeMount) ([]byte, error) {
-	// Clone the original deployment to avoid modifying it
+func calculatePatch(admissionReview *admissionv1.AdmissionReview, volumes []corev1.Volume, volumeMounts []corev1.VolumeMount) ([]byte, error) {
+
+	/// Deserialize the original Deployment from the AdmissionReview
+	var originalDeployment appsv1.Deployment
+	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &originalDeployment); err != nil {
+		return nil, err
+	}
+
+	// Apply modifications to the Deployment
 	modifiedDeployment := originalDeployment.DeepCopy()
 
 	// Add volumes and volume mounts
@@ -374,26 +402,40 @@ func calculatePatch(originalDeployment *appsv1.Deployment, volumes []corev1.Volu
 			modifiedDeployment.Spec.Template.Spec.Containers[0].VolumeMounts, volumeMounts...)
 	}
 
-	// Serialize deployments to JSON
-	originalJSON, err := json.Marshal(originalDeployment)
-	if err != nil {
-		return nil, err
-	}
+	/*
+		// Serialize deployments to JSON
+		log.Printf("marshalling original JSON")
+		originalJSON, err := json.Marshal(originalDeployment)
+		if err != nil {
+			return nil, err
+		}
+	*/
+
+	log.Printf("marshalling original new JSON")
 	modifiedJSON, err := json.Marshal(modifiedDeployment)
 	if err != nil {
 		return nil, err
 	}
 
-	log.Printf("new JSON ")
+	/*
+		if prettyJSON, err := prettyPrintJSON(string(modifiedJSON)); err == nil {
+			log.Printf("new JSON \n%s\n", prettyJSON)
+		} else {
+			log.Printf("Unable to make JSON pretty %v", err)
+		}
+	*/
 
 	// Create patch
-	patch, err := jsonpatch.CreatePatch(originalJSON, modifiedJSON)
+	patchOps, err := jsonpatch.CreatePatch(admissionReview.Request.Object.Raw, modifiedJSON)
 	if err != nil {
 		return nil, err
 	}
 
+	log.Printf("Patches:")
+	printPatchOperations(patchOps)
+
 	// Marshal patch to JSON
-	patchBytes, err := json.Marshal(patch)
+	patchBytes, err := json.Marshal(patchOps)
 	if err != nil {
 		return nil, err
 	}
@@ -424,10 +466,11 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 			printVolumeMounts(volumeMounts)
 
 			// Calculate the patch
-			if patchBytes, err := calculatePatch(&deployment, volumes, volumeMounts); err != nil {
+			if patchBytes, err := calculatePatch(&admissionReview, volumes, volumeMounts); err != nil {
 				log.Printf("Patch creation failed %v", err)
 			} else {
 				return &admissionv1.AdmissionResponse{
+					UID:     admissionReview.Request.UID,
 					Allowed: true,
 					Patch:   patchBytes,
 					PatchType: func() *admissionv1.PatchType {
@@ -441,6 +484,7 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 		log.Printf("Username not detected %v", err)
 	}
 	return &admissionv1.AdmissionResponse{
+		UID:     admissionReview.Request.UID,
 		Allowed: true,
 	}
 }
