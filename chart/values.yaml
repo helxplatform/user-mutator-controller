@@ -83,6 +83,8 @@ affinity: {}
 
 config:
   enabled: true
-  secrets:
-    gitea-creds: user-mutator-cert-tls
   data: {}
+  maps: 
+    user_features: user-features
+  secrets:
+    cert: user-mutator-cert-tls

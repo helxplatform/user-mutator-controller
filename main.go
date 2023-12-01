@@ -8,17 +8,40 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 
 	giteaAPI "code.gitea.io/gitea/modules/structs"
 	"github.com/gorilla/mux"
-	v1 "k8s.io/api/admission/v1"
+	admissionv1 "k8s.io/api/admission/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 )
 
 type GiteaAccess struct {
 	URL      string
 	Username string
 	Password string
+}
+
+type VolumeMount struct {
+	MountPath string `json:"mountPath"`
+	Name      string `json:"name"`
+}
+
+// VolumeSource represents the source of a volume.
+type VolumeSource struct {
+	Name   string `json:"name"`
+	Source string `json:"source"`
+}
+
+type VolumeConfig struct {
+	VolumeMounts  []VolumeMount  `json:"volumeMounts"`
+	VolumeSources []VolumeSource `json:"volumeSources"`
+}
+
+type UserFeatures struct {
+	Config VolumeConfig `json:"config"`
 }
 
 var access *GiteaAccess
@@ -220,18 +243,154 @@ func setupInformer(stopCh chan struct{}, namespace string) cache.SharedInformer 
 }
 */
 
-func processAdmissionReview(admissionReview v1.AdmissionReview) *v1.AdmissionResponse {
+// ReadUserFeaturesFromFile reads a UserFeatures instance from a JSON file.
+func ReadUserFeaturesFromFile(basename, directory string) (*UserFeatures, error) {
+	filePath := filepath.Join(directory, basename+".json")
+
+	// Check if the file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("file does not exist: %s", filePath)
+	}
+
+	// Read the file
+	fileData, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("error reading file: %s", err)
+	}
+
+	// Deserialize the JSON content into a UserFeatures instance
+	var features UserFeatures
+	err = json.Unmarshal(fileData, &features)
+	if err != nil {
+		return nil, fmt.Errorf("error unmarshalling JSON: %s", err)
+	}
+
+	return &features, nil
+}
+
+// ExtractUsernameFromAdmissionReview extracts the 'username' label from a Deployment in an AdmissionReview.
+func ExtractUsernameFromAdmissionReview(review admissionv1.AdmissionReview) (string, error) {
+	// Decode the raw object to a Deployment
+	var deployment appsv1.Deployment
+	if err := json.Unmarshal(review.Request.Object.Raw, &deployment); err != nil {
+		return "", fmt.Errorf("error unmarshalling deployment: %v", err)
+	}
+
+	// Extract the 'username' label
+	username, ok := deployment.ObjectMeta.Labels["username"]
+	if !ok {
+		return "", fmt.Errorf("label 'username' not found in deployment")
+	}
+
+	return username, nil
+}
+
+// GetK8sVolumeMounts converts VolumeConfig's VolumeMounts to a slice of corev1.VolumeMount
+func GetK8sVolumeMounts(config VolumeConfig) []corev1.VolumeMount {
+	var k8sVolumeMounts []corev1.VolumeMount
+
+	for _, vm := range config.VolumeMounts {
+		k8sVolumeMount := corev1.VolumeMount{
+			Name:      vm.Name,
+			MountPath: vm.MountPath,
+		}
+		k8sVolumeMounts = append(k8sVolumeMounts, k8sVolumeMount)
+	}
+
+	return k8sVolumeMounts
+}
+
+// parseVolumeSource parses the VolumeSource string and returns an appropriate corev1.VolumeSource
+func parseVolumeSource(source string) corev1.VolumeSource {
+	// Split the source string by "://"
+	parts := strings.SplitN(source, "://", 2)
+
+	// Default to assuming the source is a PVC claim name
+	if len(parts) == 1 {
+		return corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: parts[0],
+			},
+		}
+	}
+
+	// Handle different schemes
+	scheme := parts[0]
+	switch scheme {
+	case "pvc":
+		return corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: parts[1],
+			},
+		}
+		// Add cases for other schemes here
+	}
+
+	// Fallback to a default type if no recognized scheme is provided
+	return corev1.VolumeSource{}
+}
+
+// GetK8sVolumes converts VolumeConfig's VolumeSources to a slice of corev1.Volume
+func GetK8sVolumes(config VolumeConfig) []corev1.Volume {
+	var k8sVolumes []corev1.Volume
+
+	for _, vs := range config.VolumeSources {
+		volumeSource := parseVolumeSource(vs.Source)
+		k8sVolume := corev1.Volume{
+			Name:         vs.Name,
+			VolumeSource: volumeSource,
+		}
+		k8sVolumes = append(k8sVolumes, k8sVolume)
+	}
+
+	return k8sVolumes
+}
+
+func printVolumes(volumes []corev1.Volume) {
+	log.Println("Volumes:")
+	for _, volume := range volumes {
+		log.Printf("Name: %s, VolumeSource: %#v\n", volume.Name, volume.VolumeSource)
+	}
+}
+
+func printVolumeMounts(volumeMounts []corev1.VolumeMount) {
+	log.Println("VolumeMounts:")
+	for _, mount := range volumeMounts {
+		log.Printf("Name: %s, MountPath: %s, ReadOnly: %v\n", mount.Name, mount.MountPath, mount.ReadOnly)
+	}
+}
+
+func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	// Implement your logic here
 	// For example, always allow the request:
 	log.Printf("processing admission for %s:%s", admissionReview.Request.Namespace, admissionReview.Request.Name)
-	return &v1.AdmissionResponse{
+
+	// Deserialize the AdmissionReview to a Deployment object
+	var deployment appsv1.Deployment
+	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &deployment); err != nil {
+		log.Printf("Error unmarshalling deployment: %v", err)
+		return &admissionv1.AdmissionResponse{Allowed: true}
+	}
+
+	if username, err := ExtractUsernameFromAdmissionReview(admissionReview); err == nil {
+		log.Printf("deployment is for user = %s", username)
+		if features, err := ReadUserFeaturesFromFile(username, "/etc/user-mutator-maps/user-features"); err == nil {
+			volumes := GetK8sVolumes(features.Config)
+			volumeMounts := GetK8sVolumeMounts(features.Config)
+			printVolumes(volumes)
+			log.Println()
+			printVolumeMounts(volumeMounts)
+		}
+	} else {
+		log.Printf("Username not detected %v+", err)
+	}
+	return &admissionv1.AdmissionResponse{
 		Allowed: true,
 	}
 }
 
 func handleAdmissionReview(w http.ResponseWriter, r *http.Request) {
 	// Read the body of the request
-	log.Printf("handle review")
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("could not read request body: %v", err), http.StatusBadRequest)
@@ -239,7 +398,7 @@ func handleAdmissionReview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Decode the AdmissionReview request
-	var admissionReviewReq v1.AdmissionReview
+	var admissionReviewReq admissionv1.AdmissionReview
 	if err := json.Unmarshal(body, &admissionReviewReq); err != nil {
 		http.Error(w, fmt.Sprintf("could not unmarshal request: %v", err), http.StatusBadRequest)
 		return
@@ -250,7 +409,7 @@ func handleAdmissionReview(w http.ResponseWriter, r *http.Request) {
 	admissionResponse := processAdmissionReview(admissionReviewReq)
 
 	// Encode the response
-	admissionReviewResp := v1.AdmissionReview{
+	admissionReviewResp := admissionv1.AdmissionReview{
 		TypeMeta: admissionReviewReq.TypeMeta, // Use the same TypeMeta as the request
 		Response: admissionResponse,
 	}

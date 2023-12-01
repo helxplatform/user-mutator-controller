@@ -52,6 +52,10 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/user-mutator-config
+            {{- range .Values.config.maps }}
+            - name: {{ . }}-map-volume
+              mountPath: /etc/user-mutator-maps/{{ . }}
+            {{- end }}
             {{- range .Values.config.secrets }}
             - name: {{ . }}-secret-volume
               mountPath: /etc/user-mutator-secrets/{{ . }}
@@ -60,6 +64,12 @@ spec:
         - name: config
           configMap:
             name: {{ include "user-mutator.fullname" . }}
+        {{- range .Values.config.maps }}
+        - name: {{ . }}-map-volume
+          configMap:
+            name: {{ . }}
+            optional: true
+        {{- end }}
         {{- range .Values.config.secrets }}
         - name: {{ . }}-secret-volume
           secret:
