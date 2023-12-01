@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/mattbaird/jsonpatch"
+
 	giteaAPI "code.gitea.io/gitea/modules/structs"
 	"github.com/gorilla/mux"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -360,6 +362,45 @@ func printVolumeMounts(volumeMounts []corev1.VolumeMount) {
 	}
 }
 
+// calculatePatch creates a patch between the original deployment and its modified version with added volumes and mounts
+func calculatePatch(originalDeployment *appsv1.Deployment, volumes []corev1.Volume, volumeMounts []corev1.VolumeMount) ([]byte, error) {
+	// Clone the original deployment to avoid modifying it
+	modifiedDeployment := originalDeployment.DeepCopy()
+
+	// Add volumes and volume mounts
+	modifiedDeployment.Spec.Template.Spec.Volumes = append(modifiedDeployment.Spec.Template.Spec.Volumes, volumes...)
+	if len(modifiedDeployment.Spec.Template.Spec.Containers) > 0 {
+		modifiedDeployment.Spec.Template.Spec.Containers[0].VolumeMounts = append(
+			modifiedDeployment.Spec.Template.Spec.Containers[0].VolumeMounts, volumeMounts...)
+	}
+
+	// Serialize deployments to JSON
+	originalJSON, err := json.Marshal(originalDeployment)
+	if err != nil {
+		return nil, err
+	}
+	modifiedJSON, err := json.Marshal(modifiedDeployment)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("new JSON ")
+
+	// Create patch
+	patch, err := jsonpatch.CreatePatch(originalJSON, modifiedJSON)
+	if err != nil {
+		return nil, err
+	}
+
+	// Marshal patch to JSON
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return nil, err
+	}
+
+	return patchBytes, nil
+}
+
 func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	// Implement your logic here
 	// For example, always allow the request:
@@ -377,12 +418,27 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 		if features, err := ReadUserFeaturesFromFile(username, "/etc/user-mutator-maps/user-features"); err == nil {
 			volumes := GetK8sVolumes(features.Config)
 			volumeMounts := GetK8sVolumeMounts(features.Config)
+
 			printVolumes(volumes)
 			log.Println()
 			printVolumeMounts(volumeMounts)
+
+			// Calculate the patch
+			if patchBytes, err := calculatePatch(&deployment, volumes, volumeMounts); err != nil {
+				log.Printf("Patch creation failed %v", err)
+			} else {
+				return &admissionv1.AdmissionResponse{
+					Allowed: true,
+					Patch:   patchBytes,
+					PatchType: func() *admissionv1.PatchType {
+						pt := admissionv1.PatchTypeJSONPatch
+						return &pt
+					}(),
+				}
+			}
 		}
 	} else {
-		log.Printf("Username not detected %v+", err)
+		log.Printf("Username not detected %v", err)
 	}
 	return &admissionv1.AdmissionResponse{
 		Allowed: true,
