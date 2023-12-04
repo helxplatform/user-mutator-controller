@@ -302,50 +302,70 @@ func GetK8sVolumeMounts(config VolumeConfig) []corev1.VolumeMount {
 	return k8sVolumeMounts
 }
 
-// parseVolumeSource parses the VolumeSource string and returns an appropriate corev1.VolumeSource
-func parseVolumeSource(source string) corev1.VolumeSource {
+func parseVolumeSource(source string) (corev1.VolumeSource, error) {
 	// Split the source string by "://"
 	parts := strings.SplitN(source, "://", 2)
 
 	// Default to assuming the source is a PVC claim name
 	if len(parts) == 1 {
+		if parts[0] == "" {
+			return corev1.VolumeSource{}, fmt.Errorf("PVC claim name cannot be empty")
+		}
 		return corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 				ClaimName: parts[0],
 			},
-		}
+		}, nil
 	}
 
 	// Handle different schemes
 	scheme := parts[0]
 	switch scheme {
 	case "pvc":
+		if parts[1] == "" {
+			return corev1.VolumeSource{}, fmt.Errorf("PVC claim name cannot be empty")
+		}
 		return corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 				ClaimName: parts[1],
 			},
+		}, nil
+	case "nfs":
+		// Split the NFS target into server and path
+		nfsTarget := strings.SplitN(parts[1], "/", 2)
+		if len(nfsTarget) < 2 || nfsTarget[0] == "" || nfsTarget[1] == "" {
+			return corev1.VolumeSource{}, fmt.Errorf("invalid NFS target: must include non-empty server name and path")
 		}
+		return corev1.VolumeSource{
+			NFS: &corev1.NFSVolumeSource{
+				Server: nfsTarget[0],
+				Path:   "/" + nfsTarget[1],
+			},
+		}, nil
 		// Add cases for other schemes here
 	}
 
 	// Fallback to a default type if no recognized scheme is provided
-	return corev1.VolumeSource{}
+	return corev1.VolumeSource{}, fmt.Errorf("unrecognized volume source scheme: %s", scheme)
 }
 
 // GetK8sVolumes converts VolumeConfig's VolumeSources to a slice of corev1.Volume
-func GetK8sVolumes(config VolumeConfig) []corev1.Volume {
+func GetK8sVolumes(config VolumeConfig) ([]corev1.Volume, error) {
 	var k8sVolumes []corev1.Volume
 
 	for _, vs := range config.VolumeSources {
-		volumeSource := parseVolumeSource(vs.Source)
-		k8sVolume := corev1.Volume{
-			Name:         vs.Name,
-			VolumeSource: volumeSource,
+		if volumeSource, err := parseVolumeSource(vs.Source); err == nil {
+			k8sVolume := corev1.Volume{
+				Name:         vs.Name,
+				VolumeSource: volumeSource,
+			}
+			k8sVolumes = append(k8sVolumes, k8sVolume)
+		} else {
+			return nil, err
 		}
-		k8sVolumes = append(k8sVolumes, k8sVolume)
 	}
 
-	return k8sVolumes
+	return k8sVolumes, nil
 }
 
 func printVolumes(volumes []corev1.Volume) {
@@ -458,26 +478,29 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 	if username, err := ExtractUsernameFromAdmissionReview(admissionReview); err == nil {
 		log.Printf("deployment is for user = %s", username)
 		if features, err := ReadUserFeaturesFromFile(username, "/etc/user-mutator-maps/user-features"); err == nil {
-			volumes := GetK8sVolumes(features.Config)
-			volumeMounts := GetK8sVolumeMounts(features.Config)
+			if volumes, err := GetK8sVolumes(features.Config); err == nil {
+				volumeMounts := GetK8sVolumeMounts(features.Config)
 
-			printVolumes(volumes)
-			log.Println()
-			printVolumeMounts(volumeMounts)
+				printVolumes(volumes)
+				log.Println()
+				printVolumeMounts(volumeMounts)
 
-			// Calculate the patch
-			if patchBytes, err := calculatePatch(&admissionReview, volumes, volumeMounts); err != nil {
-				log.Printf("Patch creation failed %v", err)
-			} else {
-				return &admissionv1.AdmissionResponse{
-					UID:     admissionReview.Request.UID,
-					Allowed: true,
-					Patch:   patchBytes,
-					PatchType: func() *admissionv1.PatchType {
-						pt := admissionv1.PatchTypeJSONPatch
-						return &pt
-					}(),
+				// Calculate the patch
+				if patchBytes, err := calculatePatch(&admissionReview, volumes, volumeMounts); err != nil {
+					log.Printf("Patch creation failed %v", err)
+				} else {
+					return &admissionv1.AdmissionResponse{
+						UID:     admissionReview.Request.UID,
+						Allowed: true,
+						Patch:   patchBytes,
+						PatchType: func() *admissionv1.PatchType {
+							pt := admissionv1.PatchTypeJSONPatch
+							return &pt
+						}(),
+					}
 				}
+			} else {
+				log.Printf("volume spec invalid %v", err)
 			}
 		}
 	} else {
