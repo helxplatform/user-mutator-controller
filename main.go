@@ -26,22 +26,33 @@ type GiteaAccess struct {
 	Password string
 }
 
+// VolumeMount defines a specific mount point within a container.
+// It associates a Volume's Name with a MountPath inside the container,
+// indicating where the volume should be mounted.
 type VolumeMount struct {
 	MountPath string `json:"mountPath"`
 	Name      string `json:"name"`
 }
 
-// VolumeSource represents the source of a volume.
+// VolumeSource represents the source of a volume to mount.
+// It consists of a Name and a Source string. The Source string
+// is interpreted to determine the type of volume (like PVC, NFS, etc.).
 type VolumeSource struct {
 	Name   string `json:"name"`
 	Source string `json:"source"`
 }
 
+// VolumeConfig encapsulates the configuration for volumes in a Kubernetes environment.
+// It includes slices of VolumeMounts and VolumeSources, defining how and where
+// different volumes should be mounted in containers.
 type VolumeConfig struct {
 	VolumeMounts  []VolumeMount  `json:"volumeMounts"`
 	VolumeSources []VolumeSource `json:"volumeSources"`
 }
 
+// UserFeatures represents the specific features or settings associated with a user.
+// This struct is typically read from a JSON file and includes a VolumeConfig
+// that defines the user-specific volume configuration in a Kubernetes setup.
 type UserFeatures struct {
 	Config VolumeConfig `json:"config"`
 }
@@ -246,6 +257,23 @@ func setupInformer(stopCh chan struct{}, namespace string) cache.SharedInformer 
 */
 
 // ReadUserFeaturesFromFile reads a UserFeatures instance from a JSON file.
+//
+// This function constructs a file path from a directory and basename, checks for
+// the file's existence, and reads its content. It then deserializes the JSON
+// content into a UserFeatures instance. The function handles and returns errors
+// related to file existence, reading, and JSON unmarshalling.
+//
+// Parameters:
+// - basename: The base name of the file (without the .json extension).
+// - directory: The directory where the file is located.
+//
+// Returns:
+// - A pointer to a UserFeatures instance.
+// - An error, nil if the operation is successful.
+//
+// Usage:
+//
+//	features, err := ReadUserFeaturesFromFile(basename, directory)
 func ReadUserFeaturesFromFile(basename, directory string) (*UserFeatures, error) {
 	filePath := filepath.Join(directory, basename+".json")
 
@@ -270,7 +298,24 @@ func ReadUserFeaturesFromFile(basename, directory string) (*UserFeatures, error)
 	return &features, nil
 }
 
-// ExtractUsernameFromAdmissionReview extracts the 'username' label from a Deployment in an AdmissionReview.
+// ExtractUsernameFromAdmissionReview extracts the 'username' label from a Deployment
+// in an AdmissionReview.
+//
+// This function decodes a Deployment object from the raw object in an
+// AdmissionReview request. It then looks for and extracts the 'username' label
+// from the Deployment's metadata. The function returns an error if it fails to
+// unmarshal the Deployment or if the 'username' label is not found.
+//
+// Parameters:
+// - review: An AdmissionReview object containing the Deployment.
+//
+// Returns:
+// - The extracted 'username' label as a string.
+// - An error, nil if the extraction is successful.
+//
+// Usage:
+//
+//	username, err := ExtractUsernameFromAdmissionReview(admissionReview)
 func ExtractUsernameFromAdmissionReview(review admissionv1.AdmissionReview) (string, error) {
 	// Decode the raw object to a Deployment
 	var deployment appsv1.Deployment
@@ -287,7 +332,23 @@ func ExtractUsernameFromAdmissionReview(review admissionv1.AdmissionReview) (str
 	return username, nil
 }
 
-// GetK8sVolumeMounts converts VolumeConfig's VolumeMounts to a slice of corev1.VolumeMount
+// GetK8sVolumeMounts converts VolumeConfig's VolumeMounts to corev1.VolumeMount slice.
+//
+// This function takes a VolumeConfig object and iterates through its VolumeMounts,
+// converting each to a corev1.VolumeMount. It's useful for transforming custom
+// volume mount configurations into Kubernetes VolumeMount objects. The function
+// creates a slice of corev1.VolumeMounts, each corresponding to a mount defined
+// in the VolumeConfig.
+//
+// Parameters:
+// - config: A VolumeConfig object containing VolumeMounts for conversion.
+//
+// Returns:
+// - A slice of corev1.VolumeMount representing Kubernetes volume mounts.
+//
+// Usage:
+//
+//	volumeMounts := GetK8sVolumeMounts(volumeConfig)
 func GetK8sVolumeMounts(config VolumeConfig) []corev1.VolumeMount {
 	var k8sVolumeMounts []corev1.VolumeMount
 
@@ -302,6 +363,26 @@ func GetK8sVolumeMounts(config VolumeConfig) []corev1.VolumeMount {
 	return k8sVolumeMounts
 }
 
+// parseVolumeSource interprets a string to create a corev1.VolumeSource.
+//
+// This function takes a string representing a volume source and converts it into
+// a corev1.VolumeSource object. It supports different schemes indicated by a prefix
+// followed by '://'. The default assumption is a PersistentVolumeClaim (PVC) if no
+// scheme is provided. It handles 'pvc' for PVC claims and 'nfs' for NFS volumes,
+// and can be extended to support more schemes.
+// The function returns an error for empty claim names, invalid NFS targets, or
+// unrecognized schemes.
+//
+// Parameters:
+// - source: The string representing the volume source.
+//
+// Returns:
+// - A corev1.VolumeSource object constructed from the input string.
+// - An error, nil if the conversion is successful.
+//
+// Usage:
+//
+//	volumeSource, err := parseVolumeSource(sourceStr)
 func parseVolumeSource(source string) (corev1.VolumeSource, error) {
 	// Split the source string by "://"
 	parts := strings.SplitN(source, "://", 2)
@@ -349,7 +430,24 @@ func parseVolumeSource(source string) (corev1.VolumeSource, error) {
 	return corev1.VolumeSource{}, fmt.Errorf("unrecognized volume source scheme: %s", scheme)
 }
 
-// GetK8sVolumes converts VolumeConfig's VolumeSources to a slice of corev1.Volume
+// GetK8sVolumes converts VolumeConfig's VolumeSources to a slice of corev1.Volume.
+//
+// This function iterates over VolumeSources in a VolumeConfig, converting each
+// to a corev1.Volume. It uses parseVolumeSource for conversion. This function
+// is essential for transforming custom volume configurations into Kubernetes
+// Volume objects. If an error occurs during conversion, the function returns
+// the error and stops processing.
+//
+// Parameters:
+// - config: VolumeConfig containing VolumeSources for conversion.
+//
+// Returns:
+// - A slice of corev1.Volume representing Kubernetes volumes.
+// - An error, nil if the operation is successful.
+//
+// Usage:
+//
+//	volumes, err := GetK8sVolumes(volumeConfig)
 func GetK8sVolumes(config VolumeConfig) ([]corev1.Volume, error) {
 	var k8sVolumes []corev1.Volume
 
@@ -368,6 +466,19 @@ func GetK8sVolumes(config VolumeConfig) ([]corev1.Volume, error) {
 	return k8sVolumes, nil
 }
 
+// printVolumes logs the details of each Volume in the provided slice.
+//
+// This function iterates over a slice of corev1.Volume and logs their details,
+// including name and volume source. It is primarily used for debugging and
+// logging purposes, offering a quick overview of the volumes configured in a
+// Kubernetes environment.
+//
+// Parameters:
+// - volumes: A slice of corev1.Volume to be logged.
+//
+// Usage:
+//
+//	printVolumes(volumes)
 func printVolumes(volumes []corev1.Volume) {
 	log.Println("Volumes:")
 	for _, volume := range volumes {
@@ -375,6 +486,19 @@ func printVolumes(volumes []corev1.Volume) {
 	}
 }
 
+// printVolumeMounts logs details of each VolumeMount in the given slice.
+//
+// This function goes through a slice of corev1.VolumeMount and logs their
+// details, such as name, mount path, and read-only status. It's mainly used
+// for debugging and logging, offering a clear overview of volume mounts in
+// Kubernetes environments.
+//
+// Parameters:
+// - volumeMounts: Slice of corev1.VolumeMount to be logged.
+//
+// Usage:
+//
+//	printVolumeMounts(volumeMounts)
 func printVolumeMounts(volumeMounts []corev1.VolumeMount) {
 	log.Println("VolumeMounts:")
 	for _, mount := range volumeMounts {
@@ -382,6 +506,23 @@ func printVolumeMounts(volumeMounts []corev1.VolumeMount) {
 	}
 }
 
+// prettyPrintJSON formats a JSON string with indentation for readability.
+//
+// This function takes a JSON string and uses json.Indent to add indentation
+// (4 spaces). It's useful for enhancing the readability of JSON data,
+// particularly for logging or debugging purposes. On formatting errors,
+// it returns an empty string and the error.
+//
+// Parameters:
+// - inputJSON: The JSON data string to format.
+//
+// Returns:
+// - A formatted JSON string with indentation.
+// - An error object, nil if the operation is successful.
+//
+// Usage:
+//
+//	formattedJSON, err := prettyPrintJSON(rawJSON)
 func prettyPrintJSON(inputJSON string) (string, error) {
 	var buffer bytes.Buffer
 	err := json.Indent(&buffer, []byte(inputJSON), "", "    ")
@@ -391,7 +532,23 @@ func prettyPrintJSON(inputJSON string) (string, error) {
 	return buffer.String(), nil
 }
 
-// printPatchOperations prints each JsonPatchOperation in the slice
+// printPatchOperations prints each JsonPatchOperation in the provided slice.
+//
+// This function iterates over a slice of jsonpatch.JsonPatchOperation and
+// prints each operation in a formatted JSON structure. It handles errors in
+// marshalling the JsonPatchOperation and logs them, continuing to the next
+// operation if any error occurs.
+//
+// The function is primarily used for debugging purposes, providing a clear
+// visual representation of each patch operation created during the admission
+// control process.
+//
+// Parameters:
+// - operations: A slice of jsonpatch.JsonPatchOperation to be printed.
+//
+// Usage:
+//
+//	printPatchOperations(patchOperations)
 func printPatchOperations(operations []jsonpatch.JsonPatchOperation) {
 	for i, op := range operations {
 		opJSON, err := json.MarshalIndent(op, "", "    ")
@@ -403,7 +560,30 @@ func printPatchOperations(operations []jsonpatch.JsonPatchOperation) {
 	}
 }
 
-// calculatePatch creates a patch between the original deployment and its modified version with added volumes and mounts
+// calculatePatch creates a JSON patch for changes to a Deployment object in an
+// AdmissionReview.
+//
+// This function uses an AdmissionReview with the original Deployment and slices
+// of Volumes and VolumeMounts to be added. It creates a modified Deployment and
+// generates a JSON patch showing the differences between the original and the
+// modified Deployment. This patch can be applied in Kubernetes admission control.
+//
+// It handles errors for JSON unmarshalling of the original Deployment,
+// marshalling of the modified Deployment, and patch creation. The function logs
+// the patch creation process and prints patch operations for debugging.
+//
+// Parameters:
+// - admissionReview: Pointer to an AdmissionReview with the original Deployment.
+// - volumes: Slice of corev1.Volume to add to the Deployment.
+// - volumeMounts: Slice of corev1.VolumeMount to add to the first container.
+//
+// Returns:
+// - Byte slice representing the JSON patch.
+// - Error object, nil if operation is successful.
+//
+// Usage:
+//
+//	patch, err := calculatePatch(admissionReview, volumes, volumeMounts)
 func calculatePatch(admissionReview *admissionv1.AdmissionReview, volumes []corev1.Volume, volumeMounts []corev1.VolumeMount) ([]byte, error) {
 
 	/// Deserialize the original Deployment from the AdmissionReview
@@ -422,28 +602,11 @@ func calculatePatch(admissionReview *admissionv1.AdmissionReview, volumes []core
 			modifiedDeployment.Spec.Template.Spec.Containers[0].VolumeMounts, volumeMounts...)
 	}
 
-	/*
-		// Serialize deployments to JSON
-		log.Printf("marshalling original JSON")
-		originalJSON, err := json.Marshal(originalDeployment)
-		if err != nil {
-			return nil, err
-		}
-	*/
-
 	log.Printf("marshalling original new JSON")
 	modifiedJSON, err := json.Marshal(modifiedDeployment)
 	if err != nil {
 		return nil, err
 	}
-
-	/*
-		if prettyJSON, err := prettyPrintJSON(string(modifiedJSON)); err == nil {
-			log.Printf("new JSON \n%s\n", prettyJSON)
-		} else {
-			log.Printf("Unable to make JSON pretty %v", err)
-		}
-	*/
 
 	// Create patch
 	patchOps, err := jsonpatch.CreatePatch(admissionReview.Request.Object.Raw, modifiedJSON)
@@ -463,6 +626,29 @@ func calculatePatch(admissionReview *admissionv1.AdmissionReview, volumes []core
 	return patchBytes, nil
 }
 
+// processAdmissionReview processes an AdmissionReview object and returns an
+// AdmissionResponse.
+//
+// This function focuses on handling Deployment objects within Kubernetes
+// admission control. It extracts a Deployment from the AdmissionReview request,
+// processes it with custom logic, and generates an AdmissionResponse. The
+// response may include a patch modifying the Deployment based on features
+// extracted from a user-specific configuration file.
+//
+// The function handles errors for JSON unmarshalling and patch creation. It
+// logs processing stages, errors, user info extraction, and patch details. If
+// errors occur, it defaults to allowing the admission request.
+//
+// Parameters:
+// - admissionReview: An AdmissionReview object with request details.
+//
+// Returns:
+//   - A pointer to an AdmissionResponse object, including UID, Allowed status,
+//     and optionally a JSON patch and patch type for necessary modifications.
+//
+// Usage:
+//
+//	response := processAdmissionReview(admissionReview)
 func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	// Implement your logic here
 	// For example, always allow the request:
@@ -512,6 +698,20 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 	}
 }
 
+// handleAdmissionReview processes an HTTP request for Kubernetes admission control.
+//
+// This function reads and decodes an AdmissionReview request from the HTTP
+// request body, performs custom logic (handled in processAdmissionReview),
+// and then sends back an AdmissionReview response. It manages errors like
+// reading the request body, unmarshalling JSON data, and marshalling the
+// response, responding with appropriate HTTP error codes and messages.
+//
+// The function expects an HTTP request with a JSON body representing an
+// AdmissionReview object. It sends back a JSON-encoded AdmissionReview response.
+//
+// Usage:
+//
+//	http.HandleFunc("/admission-review", handleAdmissionReview)
 func handleAdmissionReview(w http.ResponseWriter, r *http.Request) {
 	// Read the body of the request
 	body, err := io.ReadAll(r.Body)
