@@ -14,7 +14,12 @@ metadata:
 data:
   [[ username ]].json: |
     {
-      "config": {
+      "secretsFrom": [
+        {
+          "secretName": "[[ username_lower ]]-sample-secret"
+        }
+      ],
+      "volumes": {
         "volumeMounts": [
           {
             "mountPath": "/mnt/test",
@@ -24,18 +29,28 @@ data:
         "volumeSources": [
           {
             "name": "test",
-            "source": "pvc://[[ pvc_name ]]-test-pvc"
+            "source": "pvc://[[ username_lower ]]-test-pvc"
           }
         ]
       }
     }
 """
 
+secret_template_text = """
+apiVersion: v1
+kind: Secret
+metadata:
+  name: [[ username_lower ]]-sample-secret
+  namespace: [[ namespace ]]
+data:
+  example-key: YWJjMTIz  # 'abc123' base64 encoded
+"""
+
 pvc_template_text = """
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: [[ pvc_name ]]-test-pvc
+  name: [[ username_lower ]]-test-pvc
   namespace: [[ namespace ]]
 spec:
   accessModes:
@@ -69,13 +84,16 @@ if __name__ == "__main__":
 
     namespace = sys.argv[1]
     username = sys.argv[2]
-    pvc_name = username.lower()
+    username_lower = username.lower()
 
     configmap_output_file = f"{namespace}_{username}_configmap.yaml"
-    pvc_output_file = f"{namespace}_{pvc_name}_pvc.yaml"
+    pvc_output_file = f"{namespace}_{username_lower}_pvc.yaml"
+    secret_output_file = f"{namespace}_{username_lower}_secret.yaml"
 
-    generate_yaml(configmap_template_text, {"namespace": namespace, "username": username, "pvc_name": pvc_name}, configmap_output_file)
-    generate_yaml(pvc_template_text, {"namespace": namespace, "pvc_name": pvc_name}, pvc_output_file)
+    generate_yaml(configmap_template_text, {"namespace": namespace, "username": username, "username_lower": username_lower}, configmap_output_file)
+    generate_yaml(pvc_template_text, {"namespace": namespace, "username_lower": username_lower}, pvc_output_file)
+    generate_yaml(secret_template_text, {"namespace": namespace, "username_lower": username_lower}, secret_output_file)
 
     print(f"ConfigMap written to {configmap_output_file}")
     print(f"PVC written to {pvc_output_file}")
+    print(f"Secret written to {secret_output_file}")

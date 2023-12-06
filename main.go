@@ -26,6 +26,13 @@ type GiteaAccess struct {
 	Password string
 }
 
+// SecretRef represents a reference to a Kubernetes Secret.
+// This is used to specify a Secret from which all key-value pairs
+// will be set as environment variables.
+type SecretRef struct {
+	SecretName string `json:"secretName"`
+}
+
 // VolumeMount defines a specific mount point within a container.
 // It associates a Volume's Name with a MountPath inside the container,
 // indicating where the volume should be mounted.
@@ -50,11 +57,12 @@ type VolumeConfig struct {
 	VolumeSources []VolumeSource `json:"volumeSources"`
 }
 
-// UserFeatures represents the specific features or settings associated with a user.
-// This struct is typically read from a JSON file and includes a VolumeConfig
-// that defines the user-specific volume configuration in a Kubernetes setup.
+// UserFeatures now includes VolumeConfig and a slice of SecretRef
+// under the field name SecretsFrom. This allows environment variables
+// to be sourced from the specified Kubernetes secrets.
 type UserFeatures struct {
-	Config VolumeConfig `json:"config"`
+	Volumes     VolumeConfig `json:"volumes"`
+	SecretsFrom []SecretRef  `json:"secretsFrom"`
 }
 
 var access *GiteaAccess
@@ -466,6 +474,23 @@ func GetK8sVolumes(config VolumeConfig) ([]corev1.Volume, error) {
 	return k8sVolumes, nil
 }
 
+func GetK8sEnvFrom(secretsFrom []SecretRef) []corev1.EnvFromSource {
+	var envFromSources []corev1.EnvFromSource
+
+	for _, secretRef := range secretsFrom {
+		envFromSource := corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: secretRef.SecretName,
+				},
+			},
+		}
+		envFromSources = append(envFromSources, envFromSource)
+	}
+
+	return envFromSources
+}
+
 // printVolumes logs the details of each Volume in the provided slice.
 //
 // This function iterates over a slice of corev1.Volume and logs their details,
@@ -560,33 +585,8 @@ func printPatchOperations(operations []jsonpatch.JsonPatchOperation) {
 	}
 }
 
-// calculatePatch creates a JSON patch for changes to a Deployment object in an
-// AdmissionReview.
-//
-// This function uses an AdmissionReview with the original Deployment and slices
-// of Volumes and VolumeMounts to be added. It creates a modified Deployment and
-// generates a JSON patch showing the differences between the original and the
-// modified Deployment. This patch can be applied in Kubernetes admission control.
-//
-// It handles errors for JSON unmarshalling of the original Deployment,
-// marshalling of the modified Deployment, and patch creation. The function logs
-// the patch creation process and prints patch operations for debugging.
-//
-// Parameters:
-// - admissionReview: Pointer to an AdmissionReview with the original Deployment.
-// - volumes: Slice of corev1.Volume to add to the Deployment.
-// - volumeMounts: Slice of corev1.VolumeMount to add to the first container.
-//
-// Returns:
-// - Byte slice representing the JSON patch.
-// - Error object, nil if operation is successful.
-//
-// Usage:
-//
-//	patch, err := calculatePatch(admissionReview, volumes, volumeMounts)
-func calculatePatch(admissionReview *admissionv1.AdmissionReview, volumes []corev1.Volume, volumeMounts []corev1.VolumeMount) ([]byte, error) {
-
-	/// Deserialize the original Deployment from the AdmissionReview
+func calculatePatch(admissionReview *admissionv1.AdmissionReview, volumes []corev1.Volume, volumeMounts []corev1.VolumeMount, envFromSources []corev1.EnvFromSource) ([]byte, error) {
+	// Deserialize the original Deployment from the AdmissionReview
 	var originalDeployment appsv1.Deployment
 	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &originalDeployment); err != nil {
 		return nil, err
@@ -598,8 +598,11 @@ func calculatePatch(admissionReview *admissionv1.AdmissionReview, volumes []core
 	// Add volumes and volume mounts
 	modifiedDeployment.Spec.Template.Spec.Volumes = append(modifiedDeployment.Spec.Template.Spec.Volumes, volumes...)
 	if len(modifiedDeployment.Spec.Template.Spec.Containers) > 0 {
-		modifiedDeployment.Spec.Template.Spec.Containers[0].VolumeMounts = append(
-			modifiedDeployment.Spec.Template.Spec.Containers[0].VolumeMounts, volumeMounts...)
+		container := &modifiedDeployment.Spec.Template.Spec.Containers[0]
+		container.VolumeMounts = append(container.VolumeMounts, volumeMounts...)
+
+		// Add envFrom sources to the first container
+		container.EnvFrom = append(container.EnvFrom, envFromSources...)
 	}
 
 	log.Printf("marshalling original new JSON")
@@ -664,15 +667,16 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 	if username, err := ExtractUsernameFromAdmissionReview(admissionReview); err == nil {
 		log.Printf("deployment is for user = %s", username)
 		if features, err := ReadUserFeaturesFromFile(username, "/etc/user-mutator-maps/user-features"); err == nil {
-			if volumes, err := GetK8sVolumes(features.Config); err == nil {
-				volumeMounts := GetK8sVolumeMounts(features.Config)
+			if volumes, err := GetK8sVolumes(features.Volumes); err == nil {
+				volumeMounts := GetK8sVolumeMounts(features.Volumes)
+				envFromSources := GetK8sEnvFrom(features.SecretsFrom)
 
-				printVolumes(volumes)
-				log.Println()
-				printVolumeMounts(volumeMounts)
+				//printVolumes(volumes)
+				//log.Println()
+				//printVolumeMounts(volumeMounts)
 
 				// Calculate the patch
-				if patchBytes, err := calculatePatch(&admissionReview, volumes, volumeMounts); err != nil {
+				if patchBytes, err := calculatePatch(&admissionReview, volumes, volumeMounts, envFromSources); err != nil {
 					log.Printf("Patch creation failed %v", err)
 				} else {
 					return &admissionv1.AdmissionResponse{
@@ -688,6 +692,8 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 			} else {
 				log.Printf("volume spec invalid %v", err)
 			}
+		} else {
+			log.Printf("user feature spec invalid %v", err)
 		}
 	} else {
 		log.Printf("Username not detected %v", err)
