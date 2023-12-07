@@ -12,6 +12,14 @@ metadata:
   name: user-features
   namespace: [[ namespace ]]
 data:
+  auto: |
+    {
+      "secretsFrom": [
+        {
+          "secretName": "global-sample-secret"
+        }
+      ]
+    }
   [[ username ]].json: |
     {
       "secretsFrom": [
@@ -36,14 +44,24 @@ data:
     }
 """
 
-secret_template_text = """
+secret_template_text1 = """
+apiVersion: v1
+kind: Secret
+metadata:
+  name: global-sample-secret
+  namespace: [[ namespace ]]
+data:
+  example-key: YWJjMTIz  # 'abc123' base64 encoded
+"""
+
+secret_template_text2 = """
 apiVersion: v1
 kind: Secret
 metadata:
   name: [[ username_lower ]]-sample-secret
   namespace: [[ namespace ]]
 data:
-  example-key: YWJjMTIz  # 'abc123' base64 encoded
+  [[ username_lower ]]-example-key: YWJjMTIz  # 'abc123' base64 encoded
 """
 
 pvc_template_text = """
@@ -88,12 +106,15 @@ if __name__ == "__main__":
 
     configmap_output_file = f"{namespace}_{username}_configmap.yaml"
     pvc_output_file = f"{namespace}_{username_lower}_pvc.yaml"
-    secret_output_file = f"{namespace}_{username_lower}_secret.yaml"
+    secret1_output_file = f"{namespace}_global_secret.yaml"
+    secret2_output_file = f"{namespace}_{username_lower}_secret.yaml"
 
     generate_yaml(configmap_template_text, {"namespace": namespace, "username": username, "username_lower": username_lower}, configmap_output_file)
     generate_yaml(pvc_template_text, {"namespace": namespace, "username_lower": username_lower}, pvc_output_file)
-    generate_yaml(secret_template_text, {"namespace": namespace, "username_lower": username_lower}, secret_output_file)
+    generate_yaml(secret_template_text1, {"namespace": namespace}, secret1_output_file)
+    generate_yaml(secret_template_text2, {"namespace": namespace, "username_lower": username_lower}, secret2_output_file)
 
     print(f"ConfigMap written to {configmap_output_file}")
     print(f"PVC written to {pvc_output_file}")
-    print(f"Secret written to {secret_output_file}")
+    print(f"Secret written to {secret1_output_file}")
+    print(f"Secret written to {secret2_output_file}")

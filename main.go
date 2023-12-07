@@ -283,11 +283,11 @@ func setupInformer(stopCh chan struct{}, namespace string) cache.SharedInformer 
 //
 //	features, err := ReadUserFeaturesFromFile(basename, directory)
 func ReadUserFeaturesFromFile(basename, directory string) (*UserFeatures, error) {
-	filePath := filepath.Join(directory, basename+".json")
+	filePath := filepath.Join(directory, basename)
 
 	// Check if the file exists
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("file does not exist: %s", filePath)
+		return nil, nil
 	}
 
 	// Read the file
@@ -629,29 +629,22 @@ func calculatePatch(admissionReview *admissionv1.AdmissionReview, volumes []core
 	return patchBytes, nil
 }
 
-// processAdmissionReview processes an AdmissionReview object and returns an
-// AdmissionResponse.
-//
-// This function focuses on handling Deployment objects within Kubernetes
-// admission control. It extracts a Deployment from the AdmissionReview request,
-// processes it with custom logic, and generates an AdmissionResponse. The
-// response may include a patch modifying the Deployment based on features
-// extracted from a user-specific configuration file.
-//
-// The function handles errors for JSON unmarshalling and patch creation. It
-// logs processing stages, errors, user info extraction, and patch details. If
-// errors occur, it defaults to allowing the admission request.
-//
-// Parameters:
-// - admissionReview: An AdmissionReview object with request details.
-//
-// Returns:
-//   - A pointer to an AdmissionResponse object, including UID, Allowed status,
-//     and optionally a JSON patch and patch type for necessary modifications.
-//
-// Usage:
-//
-//	response := processAdmissionReview(admissionReview)
+func appendFeatures(featureKey string, volumes []corev1.Volume, volumeMounts []corev1.VolumeMount, envFromSources []corev1.EnvFromSource) ([]corev1.Volume, []corev1.VolumeMount, []corev1.EnvFromSource, error) {
+	if userFeatures, err := ReadUserFeaturesFromFile(featureKey, "/etc/user-mutator-maps/user-features"); err != nil {
+		return nil, nil, nil, fmt.Errorf("user feature spec for %s invalid %v", featureKey, err)
+	} else if userFeatures != nil {
+		if specificVolumes, err := GetK8sVolumes(userFeatures.Volumes); err == nil {
+			volumes = append(volumes, specificVolumes...)
+			volumeMounts = append(volumeMounts, GetK8sVolumeMounts(userFeatures.Volumes)...)
+			envFromSources = append(envFromSources, GetK8sEnvFrom(userFeatures.SecretsFrom)...)
+			return volumes, volumeMounts, envFromSources, nil
+		} else {
+			return nil, nil, nil, fmt.Errorf("volume spec for %s invalid %v", featureKey, err)
+		}
+	}
+	return volumes, volumeMounts, envFromSources, nil
+}
+
 func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	// Implement your logic here
 	// For example, always allow the request:
@@ -666,34 +659,44 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 
 	if username, err := ExtractUsernameFromAdmissionReview(admissionReview); err == nil {
 		log.Printf("deployment is for user = %s", username)
-		if features, err := ReadUserFeaturesFromFile(username, "/etc/user-mutator-maps/user-features"); err == nil {
-			if volumes, err := GetK8sVolumes(features.Volumes); err == nil {
-				volumeMounts := GetK8sVolumeMounts(features.Volumes)
-				envFromSources := GetK8sEnvFrom(features.SecretsFrom)
+		var volumes []corev1.Volume
+		var volumeMounts []corev1.VolumeMount
+		var envFromSources []corev1.EnvFromSource
+		var err error
 
-				//printVolumes(volumes)
-				//log.Println()
-				//printVolumeMounts(volumeMounts)
-
-				// Calculate the patch
-				if patchBytes, err := calculatePatch(&admissionReview, volumes, volumeMounts, envFromSources); err != nil {
-					log.Printf("Patch creation failed %v", err)
-				} else {
-					return &admissionv1.AdmissionResponse{
-						UID:     admissionReview.Request.UID,
-						Allowed: true,
-						Patch:   patchBytes,
-						PatchType: func() *admissionv1.PatchType {
-							pt := admissionv1.PatchTypeJSONPatch
-							return &pt
-						}(),
-					}
-				}
-			} else {
-				log.Printf("volume spec invalid %v", err)
+		if volumes, volumeMounts, envFromSources, err = appendFeatures("auto", volumes, volumeMounts, envFromSources); err != nil {
+			log.Printf("failed to add auto features %v", err)
+			return &admissionv1.AdmissionResponse{
+				UID:     admissionReview.Request.UID,
+				Allowed: true,
 			}
+		}
+
+		if volumes, volumeMounts, envFromSources, err = appendFeatures(username+".json", volumes, volumeMounts, envFromSources); err != nil {
+			log.Printf("failed to add user features %v", err)
+			return &admissionv1.AdmissionResponse{
+				UID:     admissionReview.Request.UID,
+				Allowed: true,
+			}
+		}
+
+		//printVolumes(volumes)
+		//log.Println()
+		//printVolumeMounts(volumeMounts)
+
+		// Calculate the patch
+		if patchBytes, err := calculatePatch(&admissionReview, volumes, volumeMounts, envFromSources); err != nil {
+			log.Printf("Patch creation failed %v", err)
 		} else {
-			log.Printf("user feature spec invalid %v", err)
+			return &admissionv1.AdmissionResponse{
+				UID:     admissionReview.Request.UID,
+				Allowed: true,
+				Patch:   patchBytes,
+				PatchType: func() *admissionv1.PatchType {
+					pt := admissionv1.PatchTypeJSONPatch
+					return &pt
+				}(),
+			}
 		}
 	} else {
 		log.Printf("Username not detected %v", err)
