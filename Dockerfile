@@ -1,20 +1,29 @@
 # Use the official Golang image to build the binary
-FROM golang:1.20 AS build
+FROM golang:1.21 AS builder
 
-# Set the working directory
-WORKDIR /app
+ENV CGO_ENABLED 0
 
 # Copy the Go source files, Makefile, etc.
-COPY . .
+COPY webhook-server /build
 
-# Install make
-RUN apt-get update && apt-get install -y make
+# Set the working directory
+WORKDIR /build
 
-# Use the Makefile to build the Go application
-RUN make build
+RUN go build -o user-mutator
 
-# Expose port 8080
-EXPOSE 8080
+FROM alpine:3.18
+
+# Ensure we have a valid user and group
+RUN addgroup -g 1000 -S helx && \
+    adduser -u 1000 -h /app -G helx -S helx
+
+# Copy main application
+COPY --from=builder --chown=helx:helx /build/user-mutator /app
+
+USER helx
+WORKDIR /app
+# Expose port 8443
+EXPOSE 8443
 
 # Run the compiled binary
 CMD ["/app/user-mutator"]
