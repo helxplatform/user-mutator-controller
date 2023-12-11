@@ -14,7 +14,7 @@ func main() {
 	flag.Parse()
 
 	// caPEM, serverCertPEM, serverPrivKeyPEM, err := GenerateTLSCerts(certPath)
-	caPEM, _, _, err := GenerateTLSCerts(certPath)
+	caPEM, err := GenerateTLSCerts(certPath)
 	if err != nil {
 		log.Panic(err)
 	}

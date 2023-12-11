@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-func GenerateTLSCerts(certPath string) (*bytes.Buffer, *bytes.Buffer, *bytes.Buffer, error) {
+func GenerateTLSCerts(certPath string) (*bytes.Buffer, error) {
 	var (
 		webhookNamespace = os.Getenv("WEBHOOK_NAMESPACE")
 		webhookService   = os.Getenv("WEBHOOK_SERVICE")
@@ -55,12 +55,10 @@ func GenerateTLSCerts(certPath string) (*bytes.Buffer, *bytes.Buffer, *bytes.Buf
 	if existingFilesFound && existingFilesCount == 3 {
 		// Read in ca from file.
 		caPEM := ReadFile(caPEMFilename)
-		serverCertPEM := ReadFile(serverCertPEMFilename)
-		serverPrivKeyPEM := ReadFile(serverPrivKeyPEMFilename)
-		return caPEM, serverCertPEM, serverPrivKeyPEM, nil
+		return caPEM, nil
 	} else if existingFilesFound {
 		log.Println("Existing cert files found, but not all.  Delete all and rerun.")
-		return nil, nil, nil, nil
+		return nil, nil
 	} else {
 
 		ca := &x509.Certificate{
@@ -81,14 +79,14 @@ func GenerateTLSCerts(certPath string) (*bytes.Buffer, *bytes.Buffer, *bytes.Buf
 		caPrivKey, err := rsa.GenerateKey(rand.Reader, 4096)
 		if err != nil {
 			log.Println("Error: generating private key ", err)
-			return nil, nil, nil, err
+			return nil, err
 		}
 
 		// Self signed CA certificate based on template above
 		caBytes, err := x509.CreateCertificate(rand.Reader, ca, ca, &caPrivKey.PublicKey, caPrivKey)
 		if err != nil {
 			log.Println("Error: generating self signed certificate ", err)
-			return nil, nil, nil, err
+			return nil, err
 		}
 
 		// PEM encode CA certificate
@@ -122,13 +120,13 @@ func GenerateTLSCerts(certPath string) (*bytes.Buffer, *bytes.Buffer, *bytes.Buf
 		serverPrivKey, err := rsa.GenerateKey(rand.Reader, 4096)
 		if err != nil {
 			log.Println("Error: generating server priv key ", err)
-			return nil, nil, nil, err
+			return nil, err
 		}
 		// sign the server certificate, note parent is ca created at the beginning
 		serverCertBytes, err := x509.CreateCertificate(rand.Reader, cert, ca, &serverPrivKey.PublicKey, caPrivKey)
 		if err != nil {
 			log.Println("Error: creating server cert ", err)
-			return nil, nil, nil, err
+			return nil, err
 		}
 		// PEM encode the server cert and key
 		serverCertPEM := new(bytes.Buffer)
@@ -146,26 +144,26 @@ func GenerateTLSCerts(certPath string) (*bytes.Buffer, *bytes.Buffer, *bytes.Buf
 		err = os.MkdirAll(certPath, 0755)
 		if err != nil {
 			log.Println("Error: Creating Directory ", err)
-			return nil, nil, nil, err
+			return nil, err
 		}
 
 		err = WriteFile(caPEMFilename, caPEM)
 		if err != nil {
 			log.Println("Error: Writing "+caPEMFilename, err)
-			return nil, nil, nil, err
+			return nil, err
 		}
 		err = WriteFile(certPath+"cert.pem", serverCertPEM)
 		if err != nil {
 			log.Println("Error: Writing cert.pem ", err)
-			return nil, nil, nil, err
+			return nil, err
 		}
 		err = WriteFile(certPath+"key.pem", serverPrivKeyPEM)
 		if err != nil {
 			log.Println("Error: Writing key.pem ", err)
-			return nil, nil, nil, err
+			return nil, err
 
 		}
-		return caPEM, serverCertPEM, serverPrivKeyPEM, nil
+		return caPEM, nil
 	}
 }
 
