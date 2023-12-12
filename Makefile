@@ -7,7 +7,7 @@ BASE_IMAGE := user-mutator
 REGISTRY := containers.renci.org/helxplatform
 IMAGE_TAG := $(REGISTRY)/$(BASE_IMAGE)
 CHART_NAME := $(BASE_IMAGE)
-VERSION := 0.0.1
+VERSION := pjl-0.0.1
 
 ## Kind Related
 KIND_CLUSTER := mutator
@@ -18,6 +18,7 @@ secret := user-mutator-cert-tls
 mutate_config := mutating-webhook
 webhook_service := user-mutator
 webhook_namespace := mutating-webhook
+namespace_to_mutate := default
 
 .PHONY: build go-build go-test push ca-key-cert mutate-config key-cert-secret clean deploy-webhook-server deploy-all kind-up kind-load kind-down kind-all clean-all
 
@@ -42,7 +43,7 @@ go-test:
 
 push:
 	docker push $(IMAGE_TAG):$(VERSION)
-	docker push $(IMAGE_TAG):latest
+	# docker push $(IMAGE_TAG):latest
 
 ca-key-cert: export MUTATE_CONFIG = $(mutate_config)
 ca-key-cert: export WEBHOOK_SERVICE = $(webhook_service)
@@ -62,6 +63,12 @@ mutate-config: ca-key-cert
 	@echo "  kubectl get MutatingWebhookConfiguration $(mutate_config) -o yaml"
 	@echo ""
 
+enable-mutate-in-namespace:
+	kubectl label namespace $(namespace_to_mutate) enable-$(mutate_config)=true
+
+disable-mutate-in-namespace:
+	kubectl label namespace $(namespace_to_mutate) enable-$(mutate_config)-
+
 key-cert-secret: ca-key-cert
 	# create the secret with CA cert and server cert/key
 	kubectl create namespace $(webhook_namespace) || true && \
@@ -80,7 +87,9 @@ clean:
 	rm -f webhook-server/$(BINARY_NAME)
 
 deploy-webhook-server: key-cert-secret
-	helm -n $(webhook_namespace) upgrade --install $(CHART_NAME) --set "image.pullPolicy=IfNotPresent" ./chart
+	helm -n $(webhook_namespace) upgrade --install $(CHART_NAME) \
+	    --set "image.pullPolicy=IfNotPresent" --set "image.tag=$(VERSION)" \
+		./chart
 	@echo ""
 	@echo "To view and follow the logs of the mutator use the following command."
 	@echo "  kubectl -n $(webhook_namespace) -l app.kubernetes.io/name=user-mutator logs -f"
@@ -97,6 +106,6 @@ kind-load:
 kind-down:
 	kind delete cluster --name $(KIND_CLUSTER)
 
-kind-all: kind-up build kind-load deploy-webhook-server mutate-config
+kind-all: kind-up build kind-load deploy-webhook-server mutate-config enable-mutate-in-namespace
 
 clean-all: clean kind-down

@@ -64,7 +64,12 @@ func CreateMutationConfig(ctx context.Context, caPEM *bytes.Buffer) {
 						Resources:   []string{"deployments"},
 					},
 				}},
-			AdmissionReviewVersions: []string{"v1"},
+				NamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+							"enable-"+mutationCfgName: "true",
+					},
+				},
+				AdmissionReviewVersions: []string{"v1"},
 			FailurePolicy:           &fail,
 			SideEffects: func() *v1.SideEffectClass {
 				sideEffect := v1.SideEffectClassNone
