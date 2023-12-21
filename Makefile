@@ -2,8 +2,8 @@
 
 # import config.
 # You can change the default config with `make cnf="config_special.env" build`
-CNF ?= config.env
-include $(CNF)
+cnf ?= config.env
+include $(cnf)
 
 # Variable for the binary name
 BINARY_NAME := user-mutator
@@ -88,6 +88,7 @@ clean:
 deploy-webhook-server: key-cert-secret
 	helm -n $(WEBHOOK_NAMESPACE) upgrade --install $(CHART_NAME) \
 	    --set "image.pullPolicy=IfNotPresent" --set "image.tag=$(VERSION)" \
+		--set "config.secrets.cert=$(SECRET)" \
 		./chart
 	@echo ""
 	@echo "To view and follow the logs of the mutator use the following command."
@@ -99,7 +100,8 @@ deploy-all: deploy-webhook-server mutate-config
 kind-up:
 	kind create cluster --name $(KIND_CLUSTER)
 
-kind-load:
+kind-load: build
+	kind load docker-image $(IMAGE_TAG):$(VERSION) --name $(KIND_CLUSTER)
 	kind load docker-image $(IMAGE_TAG):latest --name $(KIND_CLUSTER)
 
 kind-down:
