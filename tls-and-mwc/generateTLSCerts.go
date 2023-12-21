@@ -18,38 +18,38 @@ import (
 
 func GenerateTLSCerts(certPath string) (*bytes.Buffer, error) {
 	var (
-		webhookNamespace = os.Getenv("WEBHOOK_NAMESPACE")
-		webhookService   = os.Getenv("WEBHOOK_SERVICE")
-		organization = os.Getenv("ORGANIZATION")
-		caPEMFilename = certPath+"ca.pem"
-		serverCertPEMFilename = certPath+"cert.pem"
-		serverPrivKeyPEMFilename = certPath+"key.pem"
-		existingFilesFound = false
-		existingFilesCount = 0
+		webhookNamespace         = os.Getenv("WEBHOOK_NAMESPACE")
+		webhookService           = os.Getenv("WEBHOOK_SERVICE")
+		organization             = os.Getenv("ORGANIZATION")
+		caPEMFilename            = certPath + "/ca.pem"
+		serverCertPEMFilename    = certPath + "/cert.pem"
+		serverPrivKeyPEMFilename = certPath + "/key.pem"
+		existingFilesFound       = false
+		existingFilesCount       = 0
 	)
 
 	if _, err := os.Stat(caPEMFilename); err == nil {
-		fmt.Printf("Using existing file: "+caPEMFilename+"\n");
+		fmt.Printf("Using existing file: " + caPEMFilename + "\n")
 		existingFilesFound = true
 		existingFilesCount += 1
 	} else {
-		fmt.Printf("will create "+caPEMFilename+"\n");
+		fmt.Printf("will create " + caPEMFilename + "\n")
 	}
 
 	if _, err := os.Stat(serverCertPEMFilename); err == nil {
-		fmt.Printf("Using existing file: "+serverCertPEMFilename+"\n");
+		fmt.Printf("Using existing file: " + serverCertPEMFilename + "\n")
 		existingFilesFound = true
 		existingFilesCount += 1
 	} else {
-		fmt.Printf("will create "+serverCertPEMFilename+"\n");
+		fmt.Printf("will create " + serverCertPEMFilename + "\n")
 	}
 
 	if _, err := os.Stat(serverPrivKeyPEMFilename); err == nil {
-		fmt.Printf("Using existing file: "+serverPrivKeyPEMFilename+"\n");
+		fmt.Printf("Using existing file: " + serverPrivKeyPEMFilename + "\n")
 		existingFilesFound = true
 		existingFilesCount += 1
 	} else {
-		fmt.Printf("will create "+serverPrivKeyPEMFilename+"\n");
+		fmt.Printf("will create " + serverPrivKeyPEMFilename + "\n")
 	}
 
 	if existingFilesFound && existingFilesCount == 3 {
@@ -73,7 +73,6 @@ func GenerateTLSCerts(certPath string) (*bytes.Buffer, error) {
 			KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 			BasicConstraintsValid: true,
 		}
-
 
 		// CA private key
 		caPrivKey, err := rsa.GenerateKey(rand.Reader, 4096)
@@ -99,7 +98,7 @@ func GenerateTLSCerts(certPath string) (*bytes.Buffer, error) {
 		// Very important to mirror the name of the service
 		// [name of service].[namespace].svc for dns
 		dnsNames := []string{webhookService,
-			webhookService+"."+webhookNamespace, webhookService+"."+webhookNamespace+".svc"}
+			webhookService + "." + webhookNamespace, webhookService + "." + webhookNamespace + ".svc"}
 
 		// server cert config
 		cert := &x509.Certificate{
@@ -152,12 +151,12 @@ func GenerateTLSCerts(certPath string) (*bytes.Buffer, error) {
 			log.Println("Error: Writing "+caPEMFilename, err)
 			return nil, err
 		}
-		err = WriteFile(certPath+"cert.pem", serverCertPEM)
+		err = WriteFile(serverCertPEMFilename, serverCertPEM)
 		if err != nil {
 			log.Println("Error: Writing cert.pem ", err)
 			return nil, err
 		}
-		err = WriteFile(certPath+"key.pem", serverPrivKeyPEM)
+		err = WriteFile(serverPrivKeyPEMFilename, serverPrivKeyPEM)
 		if err != nil {
 			log.Println("Error: Writing key.pem ", err)
 			return nil, err
@@ -182,30 +181,30 @@ func WriteFile(filepath string, sCert *bytes.Buffer) error {
 	return nil
 }
 
-func ReadFile(fileName string) (*bytes.Buffer) {
+func ReadFile(fileName string) *bytes.Buffer {
 	buf := new(bytes.Buffer)
 	file, err := os.Open(fileName)
 	if err != nil {
-		 fmt.Println(err)
-	   return nil
-	 }
+		fmt.Println(err)
+		return nil
+	}
 	defer file.Close()
- 
+
 	// Get the file size
 	stat, err := file.Stat()
 	if err != nil {
-	   fmt.Println(err)
-	   return nil
+		fmt.Println(err)
+		return nil
 	}
- 
+
 	// Read the file into a byte slice
 	bs := make([]byte, stat.Size())
 	_, err = bufio.NewReader(file).Read(bs)
 	if err != nil && err != io.EOF {
-	   fmt.Println(err)
-	   return nil
+		fmt.Println(err)
+		return nil
 	}
 	// fmt.Println(bs)
 	buf.Write(bs)
 	return buf
- }
+}

@@ -3,17 +3,18 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
+	"os"
 )
 
-var certPath = "../certs/"
-
 func main() {
+	certPath := os.Getenv("CERT_DIR")
+	fmt.Printf("CERT_PATH: " + certPath + "\n")
 	// Flag to enable Creation of Webhook Mutator Config
 	mutationConfig := flag.Bool("M", false, "Create Webhook Mutator Configuration.")
 	flag.Parse()
 
-	// caPEM, serverCertPEM, serverPrivKeyPEM, err := GenerateTLSCerts(certPath)
 	caPEM, err := GenerateTLSCerts(certPath)
 	if err != nil {
 		log.Panic(err)
