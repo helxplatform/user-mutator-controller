@@ -1,8 +1,7 @@
 # Use the official Golang image to build the binary
 FROM golang:1.21 AS builder
-
 ENV CGO_ENABLED 0
-
+ARG TLS_CERT_PATH
 # Copy the Go source files, Makefile, etc.
 COPY webhook-server /build
 
@@ -10,6 +9,7 @@ COPY webhook-server /build
 WORKDIR /build
 
 RUN go build -o user-mutator
+
 
 FROM alpine:3.18
 
