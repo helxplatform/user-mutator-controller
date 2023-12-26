@@ -3,7 +3,6 @@ module github.com/helxplatform/webhook-server
 go 1.21.4
 
 require (
-	github.com/gorilla/mux v1.8.1
 	github.com/mattbaird/jsonpatch v0.0.0-20230413205102-771768614e91
 	k8s.io/api v0.29.0
 )

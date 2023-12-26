@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/helxplatform/webhook-server/volumes"
+	"github.com/helxplatform/webhook-server/userMutator"
 )
 
 // readinessHandler checks the readiness of the service to handle requests.
@@ -33,7 +33,7 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	var tlsCertDir = os.Getenv("SECRET")
 	r := http.NewServeMux()
-	r.HandleFunc("/mutate", volumes.HandleAdmissionReview)
+	r.HandleFunc("/mutate", userMutator.HandleAdmissionReview)
 	r.HandleFunc("/readyz", readinessHandler)
 	r.HandleFunc("/healthz", livenessHandler)
 	http.Handle("/", r)
