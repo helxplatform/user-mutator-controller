@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/helxplatform/webhook-server/userMutator"
+	"webhook-server/userMutator"
 )
 
 // readinessHandler checks the readiness of the service to handle requests.
@@ -33,12 +33,12 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	var tlsCertDir = os.Getenv("SECRET")
 	r := http.NewServeMux()
+	// Regsiter routes
 	r.HandleFunc("/mutate", userMutator.HandleAdmissionReview)
 	r.HandleFunc("/readyz", readinessHandler)
 	r.HandleFunc("/healthz", livenessHandler)
-	http.Handle("/", r)
+
 	log.Println("Server started on :8443")
-	if err := http.ListenAndServeTLS(":8443", tlsCertDir+"/tls.crt", tlsCertDir+"/tls.key", nil); err != nil {
-		log.Printf("Failed to start server: %v", err)
-	}
+	log.Fatal(http.ListenAndServeTLS(":8443", tlsCertDir+"/tls.crt", tlsCertDir+"/tls.key", r),
+		"Failed to start server")
 }
