@@ -4,8 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
-
-	"webhook-server/userMutator"
+	"webhook-server/webhook-server/userMutator"
 )
 
 // readinessHandler checks the readiness of the service to handle requests.
@@ -32,6 +31,9 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	var tlsCertDir = os.Getenv("SECRET")
+	if tlsCertDir == "" {
+		tlsCertDir = "/tmp/certs"
+	}
 	r := http.NewServeMux()
 	// Regsiter routes
 	r.HandleFunc("/mutate", userMutator.HandleAdmissionReview)

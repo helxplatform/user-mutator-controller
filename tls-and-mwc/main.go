@@ -6,23 +6,27 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"webhook-server/tls-and-mwc/commands"
 )
 
 func main() {
 	certPath := os.Getenv("CERT_DIR")
+	if certPath == "" {
+		certPath = "/tmp/certs"
+	}
 	fmt.Printf("CERT_PATH: " + certPath + "\n")
 	// Flag to enable Creation of Webhook Mutator Config
 	mutationConfig := flag.Bool("M", false, "Create Webhook Mutator Configuration.")
 	flag.Parse()
 
-	caPEM, err := GenerateTLSCerts(certPath)
+	caPEM, err := commands.GenerateTLSCerts(certPath)
 	if err != nil {
 		log.Panic(err)
 	}
 	if *mutationConfig {
 		ctx := context.Background()
 		// Use CABundle to Register new MutationWebhook
-		CreateMutationConfig(ctx, caPEM)
+		commands.CreateMutationConfig(ctx, caPEM)
 	}
 }
 

@@ -8,6 +8,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+
+	giteaAPI "code.gitea.io/gitea/modules/structs"
+	appsv1 "k8s.io/api/apps/v1"
 )
 
 type GiteaAccess struct {
