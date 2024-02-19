@@ -1,4 +1,8 @@
-user-mutator
+webhook-server/user-mutator
 *.tgz
 *.pem
 *.crt
+certs
+venv
+tools/selfsigned_cluster_issuer.yaml
+tools/*-mutating-webhook-configuration.yaml
