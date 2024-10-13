@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -57,13 +58,41 @@ type VolumeConfig struct {
 	VolumeSources []VolumeSource `json:"volumeSources"`
 }
 
-// UserFeatures now includes VolumeConfig and a slice of SecretRef
+// UserProfiles now includes VolumeConfig and a slice of SecretRef
 // under the field name SecretsFrom. This allows environment variables
 // to be sourced from the specified Kubernetes secrets.
-type UserFeatures struct {
+type UserProfiles struct {
 	Volumes     VolumeConfig `json:"volumes"`
 	SecretsFrom []SecretRef  `json:"secretsFrom"`
 }
+
+// Struct for the main configuration
+type Config struct {
+	Features map[string]interface{} `json:"features"`
+	Maps     map[string]string      `json:"maps"`
+	Secrets  map[string]string      `json:"secrets"`
+}
+
+// Struct for LDAP configuration
+type LDAPConfig struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"-"`
+}
+
+// AppConfig struct holds paths and loaded configuration
+type AppConfig struct {
+	ConfigPath  string
+	MapsDir     string
+	SecretsDir  string
+	Config      *Config
+	TLSCertPath string
+	TLSKeyPath  string
+}
+
+// Global variable to hold application configuration
+var appConfig AppConfig
 
 var access *GiteaAccess
 var authToken string
@@ -264,11 +293,95 @@ func setupInformer(stopCh chan struct{}, namespace string) cache.SharedInformer 
 }
 */
 
-// ReadUserFeaturesFromFile reads a UserFeatures instance from a JSON file.
+// Function to load the configuration from a JSON file
+func loadConfig(path string) (*Config, error) {
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var config Config
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+// Function to process features
+func processFeatures(config *Config, secretsDir string) error {
+	for featureName, featureConfig := range config.Features {
+		fmt.Printf("Processing feature: %s\n", featureName)
+		switch featureName {
+		case "ldap":
+			ldapConfig := &LDAPConfig{}
+			// Convert featureConfig (map[string]interface{}) to LDAPConfig
+			configBytes, _ := json.Marshal(featureConfig)
+			if err := json.Unmarshal(configBytes, ldapConfig); err != nil {
+				log.Printf("Failed to parse LDAP configuration: %v", err)
+				continue
+			}
+			// Load LDAP password from secret
+			ldapSecretPath := filepath.Join(secretsDir, "ldapPassword", "password")
+			password, err := ioutil.ReadFile(ldapSecretPath)
+			if err != nil {
+				log.Printf("Failed to read LDAP password from secret: %v", err)
+				continue
+			}
+			ldapConfig.Password = string(password)
+			// Proceed with LDAP configuration
+			fmt.Printf("LDAP Config: %+v\n", ldapConfig)
+			// Implement LDAP-related logic here
+
+		// Add cases for other features as needed
+
+		default:
+			fmt.Printf("Unknown feature: %s\n", featureName)
+		}
+	}
+	return nil
+}
+
+// InitializeAppConfig initializes the global appConfig variable
+func InitializeAppConfig(configPath, mapsDir, secretsDir string) error {
+	// Load the main configuration
+	config, err := loadConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %v", err)
+	}
+
+	// Set the TLS certificate paths
+	_, exists := config.Secrets["cert"]
+	if !exists {
+		return fmt.Errorf("TLS certificate secret 'cert' not found in configuration")
+	}
+	tlsSecretDir := filepath.Join(secretsDir, "cert")
+	tlsCertPath := filepath.Join(tlsSecretDir, "tls.crt")
+	tlsKeyPath := filepath.Join(tlsSecretDir, "tls.key")
+
+	// Set the global appConfig variable
+	appConfig = AppConfig{
+		ConfigPath:  configPath,
+		MapsDir:     mapsDir,
+		SecretsDir:  secretsDir,
+		Config:      config,
+		TLSCertPath: tlsCertPath,
+		TLSKeyPath:  tlsKeyPath,
+	}
+
+	// Process features
+	if err := processFeatures(appConfig.Config, appConfig.SecretsDir); err != nil {
+		return fmt.Errorf("failed to process features: %v", err)
+	}
+
+	return nil
+}
+
+// ReadUserProfilesFromFile reads a UserProfiles instance from a JSON file.
 //
 // This function constructs a file path from a directory and basename, checks for
 // the file's existence, and reads its content. It then deserializes the JSON
-// content into a UserFeatures instance. The function handles and returns errors
+// content into a UserProfiles instance. The function handles and returns errors
 // related to file existence, reading, and JSON unmarshalling.
 //
 // Parameters:
@@ -276,13 +389,13 @@ func setupInformer(stopCh chan struct{}, namespace string) cache.SharedInformer 
 // - directory: The directory where the file is located.
 //
 // Returns:
-// - A pointer to a UserFeatures instance.
+// - A pointer to a UserProfiles instance.
 // - An error, nil if the operation is successful.
 //
 // Usage:
 //
-//	features, err := ReadUserFeaturesFromFile(basename, directory)
-func ReadUserFeaturesFromFile(basename, directory string) (*UserFeatures, error) {
+//	features, err := ReadUserProfilesFromFile(basename, directory)
+func ReadUserProfilesFromFile(basename, directory string) (*UserProfiles, error) {
 	filePath := filepath.Join(directory, basename)
 
 	// Check if the file exists
@@ -296,8 +409,8 @@ func ReadUserFeaturesFromFile(basename, directory string) (*UserFeatures, error)
 		return nil, fmt.Errorf("error reading file: %s", err)
 	}
 
-	// Deserialize the JSON content into a UserFeatures instance
-	var features UserFeatures
+	// Deserialize the JSON content into a UserProfiles instance
+	var features UserProfiles
 	err = json.Unmarshal(fileData, &features)
 	if err != nil {
 		return nil, fmt.Errorf("error unmarshalling JSON: %s", err)
@@ -629,14 +742,16 @@ func calculatePatch(admissionReview *admissionv1.AdmissionReview, volumes []core
 	return patchBytes, nil
 }
 
-func appendFeatures(featureKey string, volumes []corev1.Volume, volumeMounts []corev1.VolumeMount, envFromSources []corev1.EnvFromSource) ([]corev1.Volume, []corev1.VolumeMount, []corev1.EnvFromSource, error) {
-	if userFeatures, err := ReadUserFeaturesFromFile(featureKey, "/etc/user-mutator-maps/user-features"); err != nil {
+func appendProfiles(featureKey string, volumes []corev1.Volume, volumeMounts []corev1.VolumeMount, envFromSources []corev1.EnvFromSource) ([]corev1.Volume, []corev1.VolumeMount, []corev1.EnvFromSource, error) {
+	profilePath := filepath.Join(appConfig.MapsDir, "user-profiles")
+
+	if userProfiles, err := ReadUserProfilesFromFile(featureKey, profilePath); err != nil {
 		return nil, nil, nil, fmt.Errorf("user feature spec for %s invalid %v", featureKey, err)
-	} else if userFeatures != nil {
-		if specificVolumes, err := GetK8sVolumes(userFeatures.Volumes); err == nil {
+	} else if userProfiles != nil {
+		if specificVolumes, err := GetK8sVolumes(userProfiles.Volumes); err == nil {
 			volumes = append(volumes, specificVolumes...)
-			volumeMounts = append(volumeMounts, GetK8sVolumeMounts(userFeatures.Volumes)...)
-			envFromSources = append(envFromSources, GetK8sEnvFrom(userFeatures.SecretsFrom)...)
+			volumeMounts = append(volumeMounts, GetK8sVolumeMounts(userProfiles.Volumes)...)
+			envFromSources = append(envFromSources, GetK8sEnvFrom(userProfiles.SecretsFrom)...)
 			return volumes, volumeMounts, envFromSources, nil
 		} else {
 			return nil, nil, nil, fmt.Errorf("volume spec for %s invalid %v", featureKey, err)
@@ -664,7 +779,7 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 		var envFromSources []corev1.EnvFromSource
 		var err error
 
-		if volumes, volumeMounts, envFromSources, err = appendFeatures("auto", volumes, volumeMounts, envFromSources); err != nil {
+		if volumes, volumeMounts, envFromSources, err = appendProfiles("auto", volumes, volumeMounts, envFromSources); err != nil {
 			log.Printf("failed to add auto features %v", err)
 			return &admissionv1.AdmissionResponse{
 				UID:     admissionReview.Request.UID,
@@ -672,7 +787,7 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 			}
 		}
 
-		if volumes, volumeMounts, envFromSources, err = appendFeatures(username+".json", volumes, volumeMounts, envFromSources); err != nil {
+		if volumes, volumeMounts, envFromSources, err = appendProfiles(username+".json", volumes, volumeMounts, envFromSources); err != nil {
 			log.Printf("failed to add user features %v", err)
 			return &admissionv1.AdmissionResponse{
 				UID:     admissionReview.Request.UID,
@@ -780,13 +895,25 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+
+	// Paths
+	configPath := "/etc/user-mutator-config/config.json"
+	mapsDir := "/etc/user-mutator-maps"
+	secretsDir := "/etc/user-mutator-secrets"
+
+	// Initialize the global appConfig
+	if err := InitializeAppConfig(configPath, mapsDir, secretsDir); err != nil {
+		log.Fatalf("Initialization error: %v", err)
+	}
+
 	r := mux.NewRouter()
 	r.HandleFunc("/mutate", handleAdmissionReview)
 	r.HandleFunc("/readyz", readinessHandler)
 	r.HandleFunc("/healthz", livenessHandler)
 	http.Handle("/", r)
 	log.Println("Server started on :8443")
-	if err := http.ListenAndServeTLS(":8443", "/etc/user-mutator-secrets/user-mutator-cert-tls/tls.crt", "/etc/user-mutator-secrets/user-mutator-cert-tls/tls.key", nil); err != nil {
+
+	if err := http.ListenAndServeTLS(":8443", appConfig.TLSCertPath, appConfig.TLSKeyPath, nil); err != nil {
 		log.Printf("Failed to start server: %v", err)
 	}
 }
