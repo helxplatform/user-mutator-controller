@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	"github.com/go-ldap/ldap/v3"
 	"github.com/mattbaird/jsonpatch"
 
 	giteaAPI "code.gitea.io/gitea/modules/structs"
@@ -66,6 +67,23 @@ type UserProfiles struct {
 	SecretsFrom []SecretRef  `json:"secretsFrom"`
 }
 
+// User represents the user profile information
+type User struct {
+	UID                string   `json:"uid"`
+	CommonName         string   `json:"commonName"`
+	Surname            string   `json:"surname"`
+	GivenName          string   `json:"givenName"`
+	DisplayName        string   `json:"displayName"`
+	Email              string   `json:"email"`
+	Telephone          string   `json:"telephoneNumber"`
+	Organization       string   `json:"organization"`
+	OrganizationalUnit string   `json:"organizationalUnit"`
+	RunAsUser          string   `json:"runAsUser,omitempty"`
+	RunAsGroup         string   `json:"runAsGroup,omitempty"`
+	FsGroup            string   `json:"fsGroup,omitempty"`
+	SupplementalGroups []string `json:"supplementalGroups,omitempty"`
+}
+
 // Struct for the main configuration
 type Config struct {
 	Features map[string]interface{} `json:"features"`
@@ -79,6 +97,7 @@ type LDAPConfig struct {
 	Port     int    `json:"port"`
 	Username string `json:"username"`
 	Password string `json:"-"`
+	BaseDN   string `json:"baseDN"`
 }
 
 // AppConfig struct holds paths and loaded configuration
@@ -89,10 +108,19 @@ type AppConfig struct {
 	Config      *Config
 	TLSCertPath string
 	TLSKeyPath  string
+	LDAPConfig  *LDAPConfig
+}
+
+type ProfileResources struct {
+	Volumes            []corev1.Volume
+	VolumeMounts       []corev1.VolumeMount
+	EnvFromSources     []corev1.EnvFromSource
+	PodSecurityContext *corev1.PodSecurityContext
+	SecurityContext    *corev1.SecurityContext
 }
 
 // Global variable to hold application configuration
-var appConfig AppConfig
+var appConfig *AppConfig
 
 var access *GiteaAccess
 var authToken string
@@ -295,7 +323,7 @@ func setupInformer(stopCh chan struct{}, namespace string) cache.SharedInformer 
 
 // Function to load the configuration from a JSON file
 func loadConfig(path string) (*Config, error) {
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +337,10 @@ func loadConfig(path string) (*Config, error) {
 }
 
 // Function to process features
-func processFeatures(config *Config, secretsDir string) error {
+func processFeatures(appConfig *AppConfig) error {
+	config := appConfig.Config
+	secretsDir := appConfig.SecretsDir
+
 	for featureName, featureConfig := range config.Features {
 		fmt.Printf("Processing feature: %s\n", featureName)
 		switch featureName {
@@ -318,23 +349,19 @@ func processFeatures(config *Config, secretsDir string) error {
 			// Convert featureConfig (map[string]interface{}) to LDAPConfig
 			configBytes, _ := json.Marshal(featureConfig)
 			if err := json.Unmarshal(configBytes, ldapConfig); err != nil {
-				log.Printf("Failed to parse LDAP configuration: %v", err)
-				continue
+				return fmt.Errorf("failed to parse LDAP configuration: %v", err)
 			}
 			// Load LDAP password from secret
-			ldapSecretPath := filepath.Join(secretsDir, "ldapPassword", "password")
-			password, err := ioutil.ReadFile(ldapSecretPath)
+			ldapSecretPath := filepath.Join(secretsDir, "ldap-password", "password")
+			password, err := os.ReadFile(ldapSecretPath)
 			if err != nil {
-				log.Printf("Failed to read LDAP password from secret: %v", err)
-				continue
+				return fmt.Errorf("failed to read LDAP password from secret: %v", err)
 			}
 			ldapConfig.Password = string(password)
-			// Proceed with LDAP configuration
+			// Store ldapConfig in appConfig for later use
+			appConfig.LDAPConfig = ldapConfig
+			// Proceed with LDAP initialization if needed
 			fmt.Printf("LDAP Config: %+v\n", ldapConfig)
-			// Implement LDAP-related logic here
-
-		// Add cases for other features as needed
-
 		default:
 			fmt.Printf("Unknown feature: %s\n", featureName)
 		}
@@ -343,38 +370,36 @@ func processFeatures(config *Config, secretsDir string) error {
 }
 
 // InitializeAppConfig initializes the global appConfig variable
-func InitializeAppConfig(configPath, mapsDir, secretsDir string) error {
+func InitializeAppConfig(configPath, mapsDir, secretsDir string) (*AppConfig, error) {
 	// Load the main configuration
 	config, err := loadConfig(configPath)
 	if err != nil {
-		return fmt.Errorf("failed to load configuration: %v", err)
+		return nil, fmt.Errorf("failed to load configuration: %v", err)
+	}
+
+	// Create the appConfig instance
+	appConfig := &AppConfig{
+		ConfigPath: configPath,
+		MapsDir:    mapsDir,
+		SecretsDir: secretsDir,
+		Config:     config,
 	}
 
 	// Set the TLS certificate paths
 	_, exists := config.Secrets["cert"]
 	if !exists {
-		return fmt.Errorf("TLS certificate secret 'cert' not found in configuration")
+		return nil, fmt.Errorf("TLS certificate secret 'cert' not found in configuration")
 	}
 	tlsSecretDir := filepath.Join(secretsDir, "cert")
-	tlsCertPath := filepath.Join(tlsSecretDir, "tls.crt")
-	tlsKeyPath := filepath.Join(tlsSecretDir, "tls.key")
+	appConfig.TLSCertPath = filepath.Join(tlsSecretDir, "tls.crt")
+	appConfig.TLSKeyPath = filepath.Join(tlsSecretDir, "tls.key")
 
-	// Set the global appConfig variable
-	appConfig = AppConfig{
-		ConfigPath:  configPath,
-		MapsDir:     mapsDir,
-		SecretsDir:  secretsDir,
-		Config:      config,
-		TLSCertPath: tlsCertPath,
-		TLSKeyPath:  tlsKeyPath,
+	// Process features and update appConfig accordingly
+	if err := processFeatures(appConfig); err != nil {
+		return nil, fmt.Errorf("failed to process features: %v", err)
 	}
 
-	// Process features
-	if err := processFeatures(appConfig.Config, appConfig.SecretsDir); err != nil {
-		return fmt.Errorf("failed to process features: %v", err)
-	}
-
-	return nil
+	return appConfig, nil
 }
 
 // ReadUserProfilesFromFile reads a UserProfiles instance from a JSON file.
@@ -417,6 +442,68 @@ func ReadUserProfilesFromFile(basename, directory string) (*UserProfiles, error)
 	}
 
 	return &features, nil
+}
+
+func searchLDAP(username string) (*User, error) {
+	ldapConfig := appConfig.LDAPConfig
+	if ldapConfig == nil {
+		return nil, fmt.Errorf("LDAP configuration not initialized")
+	}
+
+	// Connect to LDAP
+	l, err := ldap.Dial("tcp", fmt.Sprintf("%s:%d", ldapConfig.Host, ldapConfig.Port))
+	if err != nil {
+		return nil, err
+	}
+	defer l.Close()
+
+	// Bind with credentials
+	err = l.Bind(ldapConfig.Username, ldapConfig.Password)
+	if err != nil {
+		return nil, err
+	}
+
+	// Search for the given username
+	searchRequest := ldap.NewSearchRequest(
+		ldapConfig.BaseDN,
+		ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
+		fmt.Sprintf("(uid=%s)", ldap.EscapeFilter(username)),
+		[]string{
+			"uid", "cn", "sn", "givenName", "displayName", "mail",
+			"telephoneNumber", "o", "ou", "runAsUser", "runAsGroup",
+			"fsGroup", "supplementalGroups",
+		},
+		nil,
+	)
+
+	sr, err := l.Search(searchRequest)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(sr.Entries) == 0 {
+		log.Printf("LDAP User not found: %s", username)
+		return nil, nil
+	}
+
+	entry := sr.Entries[0]
+	user := &User{
+		UID:                entry.GetAttributeValue("uid"),
+		CommonName:         entry.GetAttributeValue("cn"),
+		Surname:            entry.GetAttributeValue("sn"),
+		GivenName:          entry.GetAttributeValue("givenName"),
+		DisplayName:        entry.GetAttributeValue("displayName"),
+		Email:              entry.GetAttributeValue("mail"),
+		Telephone:          entry.GetAttributeValue("telephoneNumber"),
+		Organization:       entry.GetAttributeValue("o"),
+		OrganizationalUnit: entry.GetAttributeValue("ou"),
+		RunAsUser:          entry.GetAttributeValue("runAsUser"),
+		RunAsGroup:         entry.GetAttributeValue("runAsGroup"),
+		FsGroup:            entry.GetAttributeValue("fsGroup"),
+		SupplementalGroups: entry.GetAttributeValues("supplementalGroups"),
+	}
+
+	return user, nil
 }
 
 // ExtractUsernameFromAdmissionReview extracts the 'username' label from a Deployment
@@ -604,6 +691,54 @@ func GetK8sEnvFrom(secretsFrom []SecretRef) []corev1.EnvFromSource {
 	return envFromSources
 }
 
+func constructSecurityContexts(user *User) (*corev1.PodSecurityContext, *corev1.SecurityContext, error) {
+	var podSecurityContext corev1.PodSecurityContext
+	var securityContext corev1.SecurityContext
+
+	// Parse RunAsUser for SecurityContext
+	if user.RunAsUser != "" {
+		runAsUser, err := strconv.ParseInt(user.RunAsUser, 10, 64)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid RunAsUser: %v", err)
+		}
+		securityContext.RunAsUser = &runAsUser
+	}
+
+	// Parse RunAsGroup for SecurityContext
+	if user.RunAsGroup != "" {
+		runAsGroup, err := strconv.ParseInt(user.RunAsGroup, 10, 64)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid RunAsGroup: %v", err)
+		}
+		securityContext.RunAsGroup = &runAsGroup
+	}
+
+	// Parse FsGroup for PodSecurityContext
+	if user.FsGroup != "" {
+		fsGroup, err := strconv.ParseInt(user.FsGroup, 10, 64)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid FsGroup: %v", err)
+		}
+		podSecurityContext.FSGroup = &fsGroup
+	}
+
+	// Parse SupplementalGroups for PodSecurityContext
+	if len(user.SupplementalGroups) > 0 {
+		var supplementalGroups []int64
+		for _, sg := range user.SupplementalGroups {
+			sgInt, err := strconv.ParseInt(sg, 10, 64)
+			if err != nil {
+				log.Printf("Invalid SupplementalGroup '%s': %v", sg, err)
+				continue
+			}
+			supplementalGroups = append(supplementalGroups, sgInt)
+		}
+		podSecurityContext.SupplementalGroups = supplementalGroups
+	}
+
+	return &podSecurityContext, &securityContext, nil
+}
+
 // printVolumes logs the details of each Volume in the provided slice.
 //
 // This function iterates over a slice of corev1.Volume and logs their details,
@@ -698,24 +833,46 @@ func printPatchOperations(operations []jsonpatch.JsonPatchOperation) {
 	}
 }
 
-func calculatePatch(admissionReview *admissionv1.AdmissionReview, volumes []corev1.Volume, volumeMounts []corev1.VolumeMount, envFromSources []corev1.EnvFromSource) ([]byte, error) {
+// applyResourcesToContainers applies the given resources to each container in the slice.
+func applyResourcesToContainers(containers []corev1.Container, resources ProfileResources) {
+	for i := range containers {
+		container := &containers[i]
+
+		// Add volume mounts
+		container.VolumeMounts = append(container.VolumeMounts, resources.VolumeMounts...)
+
+		// Apply SecurityContext
+		if resources.SecurityContext != nil {
+			container.SecurityContext = resources.SecurityContext
+		}
+
+		// Add envFrom sources
+		container.EnvFrom = append(container.EnvFrom, resources.EnvFromSources...)
+	}
+}
+
+func calculatePatch(admissionReview *admissionv1.AdmissionReview, resources ProfileResources) ([]byte, error) {
 	// Deserialize the original Deployment from the AdmissionReview
 	var originalDeployment appsv1.Deployment
 	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &originalDeployment); err != nil {
 		return nil, err
 	}
 
-	// Apply modifications to the Deployment
+	// Apply modifications to the Deployment by starting with a copy
 	modifiedDeployment := originalDeployment.DeepCopy()
 
-	// Add volumes and volume mounts
-	modifiedDeployment.Spec.Template.Spec.Volumes = append(modifiedDeployment.Spec.Template.Spec.Volumes, volumes...)
-	if len(modifiedDeployment.Spec.Template.Spec.Containers) > 0 {
-		container := &modifiedDeployment.Spec.Template.Spec.Containers[0]
-		container.VolumeMounts = append(container.VolumeMounts, volumeMounts...)
+	// Add volumes
+	modifiedDeployment.Spec.Template.Spec.Volumes = append(modifiedDeployment.Spec.Template.Spec.Volumes, resources.Volumes...)
 
-		// Add envFrom sources to the first container
-		container.EnvFrom = append(container.EnvFrom, envFromSources...)
+	// Apply modifications to the Containers
+	applyResourcesToContainers(modifiedDeployment.Spec.Template.Spec.Containers, resources)
+
+	// Apply modifications to the InitContainers
+	applyResourcesToContainers(modifiedDeployment.Spec.Template.Spec.InitContainers, resources)
+
+	// Apply PodSecurityContext
+	if resources.PodSecurityContext != nil {
+		modifiedDeployment.Spec.Template.Spec.SecurityContext = resources.PodSecurityContext
 	}
 
 	log.Printf("marshalling original new JSON")
@@ -742,22 +899,23 @@ func calculatePatch(admissionReview *admissionv1.AdmissionReview, volumes []core
 	return patchBytes, nil
 }
 
-func appendProfiles(featureKey string, volumes []corev1.Volume, volumeMounts []corev1.VolumeMount, envFromSources []corev1.EnvFromSource) ([]corev1.Volume, []corev1.VolumeMount, []corev1.EnvFromSource, error) {
-	profilePath := filepath.Join(appConfig.MapsDir, "user-profiles")
+func appendProfiles(featureKey string, resources ProfileResources) (ProfileResources, error) {
+	profilePath := filepath.Join(appConfig.MapsDir, "user_profiles")
 
-	if userProfiles, err := ReadUserProfilesFromFile(featureKey, profilePath); err != nil {
-		return nil, nil, nil, fmt.Errorf("user feature spec for %s invalid %v", featureKey, err)
-	} else if userProfiles != nil {
-		if specificVolumes, err := GetK8sVolumes(userProfiles.Volumes); err == nil {
-			volumes = append(volumes, specificVolumes...)
-			volumeMounts = append(volumeMounts, GetK8sVolumeMounts(userProfiles.Volumes)...)
-			envFromSources = append(envFromSources, GetK8sEnvFrom(userProfiles.SecretsFrom)...)
-			return volumes, volumeMounts, envFromSources, nil
-		} else {
-			return nil, nil, nil, fmt.Errorf("volume spec for %s invalid %v", featureKey, err)
-		}
+	userProfiles, err := ReadUserProfilesFromFile(featureKey, profilePath)
+	if err != nil {
+		return resources, fmt.Errorf("user feature spec for %s invalid: %v", featureKey, err)
 	}
-	return volumes, volumeMounts, envFromSources, nil
+	if userProfiles != nil {
+		specificVolumes, err := GetK8sVolumes(userProfiles.Volumes)
+		if err != nil {
+			return resources, fmt.Errorf("volume spec for %s invalid: %v", featureKey, err)
+		}
+		resources.Volumes = append(resources.Volumes, specificVolumes...)
+		resources.VolumeMounts = append(resources.VolumeMounts, GetK8sVolumeMounts(userProfiles.Volumes)...)
+		resources.EnvFromSources = append(resources.EnvFromSources, GetK8sEnvFrom(userProfiles.SecretsFrom)...)
+	}
+	return resources, nil
 }
 
 func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
@@ -774,12 +932,11 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 
 	if username, err := ExtractUsernameFromAdmissionReview(admissionReview); err == nil {
 		log.Printf("deployment is for user = %s", username)
-		var volumes []corev1.Volume
-		var volumeMounts []corev1.VolumeMount
-		var envFromSources []corev1.EnvFromSource
-		var err error
 
-		if volumes, volumeMounts, envFromSources, err = appendProfiles("auto", volumes, volumeMounts, envFromSources); err != nil {
+		var err error
+		resources := ProfileResources{Volumes: []corev1.Volume{}, VolumeMounts: []corev1.VolumeMount{}, EnvFromSources: []corev1.EnvFromSource{}}
+
+		if resources, err = appendProfiles("auto", resources); err != nil {
 			log.Printf("failed to add auto features %v", err)
 			return &admissionv1.AdmissionResponse{
 				UID:     admissionReview.Request.UID,
@@ -787,7 +944,7 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 			}
 		}
 
-		if volumes, volumeMounts, envFromSources, err = appendProfiles(username+".json", volumes, volumeMounts, envFromSources); err != nil {
+		if resources, err = appendProfiles(username+".json", resources); err != nil {
 			log.Printf("failed to add user features %v", err)
 			return &admissionv1.AdmissionResponse{
 				UID:     admissionReview.Request.UID,
@@ -799,8 +956,25 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 		//log.Println()
 		//printVolumeMounts(volumeMounts)
 
+		// Search LDAP for user information
+		user, err := searchLDAP(username)
+		if err != nil {
+			log.Printf("Failed to retrieve user from LDAP: %v", err)
+			// Decide how to handle the error (e.g., proceed without security contexts)
+		} else {
+			// Construct both security contexts from the User struct
+			podSecurityContext, securityContext, err := constructSecurityContexts(user)
+			if err != nil {
+				log.Printf("Failed to construct security contexts: %v", err)
+				// Decide how to handle the error
+			} else {
+				resources.PodSecurityContext = podSecurityContext
+				resources.SecurityContext = securityContext
+			}
+		}
+
 		// Calculate the patch
-		if patchBytes, err := calculatePatch(&admissionReview, volumes, volumeMounts, envFromSources); err != nil {
+		if patchBytes, err := calculatePatch(&admissionReview, resources); err != nil {
 			log.Printf("Patch creation failed %v", err)
 		} else {
 			return &admissionv1.AdmissionResponse{
@@ -895,6 +1069,7 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	var err error
 
 	// Paths
 	configPath := "/etc/user-mutator-config/config.json"
@@ -902,7 +1077,7 @@ func main() {
 	secretsDir := "/etc/user-mutator-secrets"
 
 	// Initialize the global appConfig
-	if err := InitializeAppConfig(configPath, mapsDir, secretsDir); err != nil {
+	if appConfig, err = InitializeAppConfig(configPath, mapsDir, secretsDir); err != nil {
 		log.Fatalf("Initialization error: %v", err)
 	}
 
