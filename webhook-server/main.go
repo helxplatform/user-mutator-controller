@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,12 +15,15 @@ import (
 
 	"github.com/go-ldap/ldap/v3"
 	"github.com/mattbaird/jsonpatch"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	giteaAPI "code.gitea.io/gitea/modules/structs"
 	"github.com/gorilla/mux"
 	admissionv1 "k8s.io/api/admission/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type GiteaAccess struct {
@@ -82,6 +86,7 @@ type User struct {
 	RunAsGroup         string   `json:"runAsGroup,omitempty"`
 	FsGroup            string   `json:"fsGroup,omitempty"`
 	SupplementalGroups []string `json:"supplementalGroups,omitempty"`
+	Groups             []string `json:"groups,omitempty"`
 }
 
 // Struct for the main configuration
@@ -109,6 +114,8 @@ type AppConfig struct {
 	TLSCertPath string
 	TLSKeyPath  string
 	LDAPConfig  *LDAPConfig
+	K8sClient   *kubernetes.Clientset // Add Kubernetes client handle
+
 }
 
 type ProfileResources struct {
@@ -336,6 +343,11 @@ func loadConfig(path string) (*Config, error) {
 	return &config, nil
 }
 
+// Custom String method to avoid printing the password
+func (l LDAPConfig) String() string {
+	return fmt.Sprintf("LDAPConfig{Host: %s, Port: %d, Username: %s, BaseDN: %s}", l.Host, l.Port, l.Username, l.BaseDN)
+}
+
 // Function to process features
 func processFeatures(appConfig *AppConfig) error {
 	config := appConfig.Config
@@ -361,7 +373,7 @@ func processFeatures(appConfig *AppConfig) error {
 			// Store ldapConfig in appConfig for later use
 			appConfig.LDAPConfig = ldapConfig
 			// Proceed with LDAP initialization if needed
-			fmt.Printf("LDAP Config: %+v\n", ldapConfig)
+			fmt.Println(ldapConfig)
 		default:
 			fmt.Printf("Unknown feature: %s\n", featureName)
 		}
@@ -398,6 +410,22 @@ func InitializeAppConfig(configPath, mapsDir, secretsDir string) (*AppConfig, er
 	if err := processFeatures(appConfig); err != nil {
 		return nil, fmt.Errorf("failed to process features: %v", err)
 	}
+
+	// Initialize Kubernetes client using in-cluster config
+	k8sConfig, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create in-cluster Kubernetes config: %v", err)
+	}
+
+	k8sClient, err := kubernetes.NewForConfig(k8sConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Kubernetes client: %v", err)
+	}
+
+	// Set the Kubernetes client handle in the appConfig
+	appConfig.K8sClient = k8sClient
+
+	log.Println("Kubernetes client successfully initialized")
 
 	return appConfig, nil
 }
@@ -444,6 +472,26 @@ func ReadUserProfilesFromFile(basename, directory string) (*UserProfiles, error)
 	return &features, nil
 }
 
+func extractCN(dn string) string {
+	parts := strings.Split(dn, ",")
+	for _, part := range parts {
+		if strings.HasPrefix(strings.TrimSpace(part), "cn=") {
+			return strings.TrimPrefix(strings.TrimSpace(part), "cn=")
+		}
+	}
+	return ""
+}
+
+// Example usage within your existing searchLDAP function or another appropriate part of your code:
+// Assuming `groupDNs` is a slice of strings fetched from the `memberOf` attribute
+func extractGroupNames(groupDNs []string) []string {
+	groupCNs := make([]string, len(groupDNs))
+	for i, dn := range groupDNs {
+		groupCNs[i] = extractCN(dn)
+	}
+	return groupCNs
+}
+
 func searchLDAP(username string) (*User, error) {
 	ldapConfig := appConfig.LDAPConfig
 	if ldapConfig == nil {
@@ -471,7 +519,7 @@ func searchLDAP(username string) (*User, error) {
 		[]string{
 			"uid", "cn", "sn", "givenName", "displayName", "mail",
 			"telephoneNumber", "o", "ou", "runAsUser", "runAsGroup",
-			"fsGroup", "supplementalGroups",
+			"fsGroup", "supplementalGroups", "memberOf",
 		},
 		nil,
 	)
@@ -501,7 +549,10 @@ func searchLDAP(username string) (*User, error) {
 		RunAsGroup:         entry.GetAttributeValue("runAsGroup"),
 		FsGroup:            entry.GetAttributeValue("fsGroup"),
 		SupplementalGroups: entry.GetAttributeValues("supplementalGroups"),
+		Groups:             extractGroupNames(entry.GetAttributeValues("memberOf")),
 	}
+
+	log.Printf("user: %v", user)
 
 	return user, nil
 }
@@ -739,6 +790,72 @@ func constructSecurityContexts(user *User) (*corev1.PodSecurityContext, *corev1.
 	return &podSecurityContext, &securityContext, nil
 }
 
+func getPVCsByLabel(clientset *kubernetes.Clientset, groupName, namespace string) ([]corev1.PersistentVolumeClaim, error) {
+	// Define the label selector to filter by the "helx.renci.org/group-name" label
+	labelSelector := fmt.Sprintf("helx.renci.org/group-name=%s", groupName)
+
+	// Get the list of PVCs in the specified namespace with the label selector
+	pvcList, err := clientset.CoreV1().PersistentVolumeClaims(namespace).List(context.Background(), metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if len(pvcList.Items) == 0 {
+		log.Printf("no PVCs found with label helx.renci.org/group-name=%s", groupName)
+	} else if len(pvcList.Items) > 1 {
+		log.Printf("multiple PVCs found with label helx.renci.org/group-name=%s", groupName)
+	}
+
+	return pvcList.Items, nil
+}
+
+// getVolumesAndMountsForUserGroups constructs volumes and volume mounts for the user's groups.
+func getVolumesAndMountsForUserGroups(clientset *kubernetes.Clientset, user *User, namespace string) ([]corev1.Volume, []corev1.VolumeMount, error) {
+	var volumes []corev1.Volume
+	var volumeMounts []corev1.VolumeMount
+
+	for _, groupName := range user.Groups {
+		// Get PVCs labeled with the group name
+		pvcs, err := getPVCsByLabel(clientset, groupName, namespace)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		// If there are PVCs for this group, take the first one
+		if len(pvcs) > 0 {
+			pvc := pvcs[0]
+
+			// Use the PVC name as the volume name
+			volumeName := pvc.Name
+
+			// Create the volume
+			volume := corev1.Volume{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: pvc.Name,
+					},
+				},
+			}
+
+			// Create the volume mount
+			volumeMount := corev1.VolumeMount{
+				Name:      volumeName,
+				MountPath: fmt.Sprintf("/shared/%s", groupName),
+			}
+
+			// Add to the slices
+			volumes = append(volumes, volume)
+			volumeMounts = append(volumeMounts, volumeMount)
+		}
+		// If no PVCs are found, skip this group
+	}
+
+	return volumes, volumeMounts, nil
+}
+
 // printVolumes logs the details of each Volume in the provided slice.
 //
 // This function iterates over a slice of corev1.Volume and logs their details,
@@ -918,6 +1035,26 @@ func appendProfiles(featureKey string, resources ProfileResources) (ProfileResou
 	return resources, nil
 }
 
+func setSecurityContexts(user *User, resources ProfileResources) (ProfileResources, error) {
+	podSecurityContext, securityContext, err := constructSecurityContexts(user)
+	if err != nil {
+		return resources, fmt.Errorf("failed to construct security contexts: %v", err)
+	}
+	resources.PodSecurityContext = podSecurityContext
+	resources.SecurityContext = securityContext
+	return resources, nil
+}
+
+func addGroupsToProfile(clientset *kubernetes.Clientset, user *User, namespace string, resources ProfileResources) (ProfileResources, error) {
+	volumes, volumeMounts, err := getVolumesAndMountsForUserGroups(clientset, user, namespace)
+	if err != nil {
+		return resources, fmt.Errorf("could not detect group PVCs for user %s: %v", user.UID, err)
+	}
+	resources.Volumes = append(resources.Volumes, volumes...)
+	resources.VolumeMounts = append(resources.VolumeMounts, volumeMounts...)
+	return resources, nil
+}
+
 func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	// Implement your logic here
 	// For example, always allow the request:
@@ -938,40 +1075,28 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 
 		if resources, err = appendProfiles("auto", resources); err != nil {
 			log.Printf("failed to add auto features %v", err)
-			return &admissionv1.AdmissionResponse{
-				UID:     admissionReview.Request.UID,
-				Allowed: true,
-			}
 		}
 
 		if resources, err = appendProfiles(username+".json", resources); err != nil {
 			log.Printf("failed to add user features %v", err)
-			return &admissionv1.AdmissionResponse{
-				UID:     admissionReview.Request.UID,
-				Allowed: true,
+		}
+
+		// Search LDAP for user information
+		user, err := searchLDAP(username)
+		if err != nil {
+			log.Printf("Failed to retrieve user from LDAP: %v", err)
+		} else {
+			if resources, err = setSecurityContexts(user, resources); err != nil {
+				log.Printf("Failed to construct security contexts: %v", err)
+			}
+			if resources, err = addGroupsToProfile(appConfig.K8sClient, user, admissionReview.Request.Namespace, resources); err != nil {
+				log.Printf("Failed to add group volumes: %v", err)
 			}
 		}
 
 		//printVolumes(volumes)
 		//log.Println()
 		//printVolumeMounts(volumeMounts)
-
-		// Search LDAP for user information
-		user, err := searchLDAP(username)
-		if err != nil {
-			log.Printf("Failed to retrieve user from LDAP: %v", err)
-			// Decide how to handle the error (e.g., proceed without security contexts)
-		} else {
-			// Construct both security contexts from the User struct
-			podSecurityContext, securityContext, err := constructSecurityContexts(user)
-			if err != nil {
-				log.Printf("Failed to construct security contexts: %v", err)
-				// Decide how to handle the error
-			} else {
-				resources.PodSecurityContext = podSecurityContext
-				resources.SecurityContext = securityContext
-			}
-		}
 
 		// Calculate the patch
 		if patchBytes, err := calculatePatch(&admissionReview, resources); err != nil {
