@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,15 +10,20 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	"github.com/go-ldap/ldap/v3"
 	"github.com/mattbaird/jsonpatch"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	giteaAPI "code.gitea.io/gitea/modules/structs"
 	"github.com/gorilla/mux"
 	admissionv1 "k8s.io/api/admission/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type GiteaAccess struct {
@@ -57,13 +63,71 @@ type VolumeConfig struct {
 	VolumeSources []VolumeSource `json:"volumeSources"`
 }
 
-// UserFeatures now includes VolumeConfig and a slice of SecretRef
+// UserProfiles now includes VolumeConfig and a slice of SecretRef
 // under the field name SecretsFrom. This allows environment variables
 // to be sourced from the specified Kubernetes secrets.
-type UserFeatures struct {
+type UserProfiles struct {
 	Volumes     VolumeConfig `json:"volumes"`
 	SecretsFrom []SecretRef  `json:"secretsFrom"`
 }
+
+// User represents the user profile information
+type User struct {
+	UID                string   `json:"uid"`
+	CommonName         string   `json:"commonName"`
+	Surname            string   `json:"surname"`
+	GivenName          string   `json:"givenName"`
+	DisplayName        string   `json:"displayName"`
+	Email              string   `json:"email"`
+	Telephone          string   `json:"telephoneNumber"`
+	Organization       string   `json:"organization"`
+	OrganizationalUnit string   `json:"organizationalUnit"`
+	RunAsUser          string   `json:"runAsUser,omitempty"`
+	RunAsGroup         string   `json:"runAsGroup,omitempty"`
+	FsGroup            string   `json:"fsGroup,omitempty"`
+	SupplementalGroups []string `json:"supplementalGroups,omitempty"`
+	Groups             []string `json:"groups,omitempty"`
+}
+
+// Struct for the main configuration
+type Config struct {
+	Features map[string]interface{} `json:"features"`
+	Maps     map[string]string      `json:"maps"`
+	Secrets  map[string]string      `json:"secrets"`
+}
+
+// Struct for LDAP configuration
+type LDAPConfig struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"-"`
+	BaseDN   string `json:"baseDN"`
+}
+
+// AppConfig struct holds paths and loaded configuration
+type AppConfig struct {
+	ConfigPath  string
+	MapsDir     string
+	SecretsDir  string
+	Config      *Config
+	TLSCertPath string
+	TLSKeyPath  string
+	LDAPConfig  *LDAPConfig
+	K8sClient   *kubernetes.Clientset // Add Kubernetes client handle
+
+}
+
+type ProfileResources struct {
+	Volumes            []corev1.Volume
+	VolumeMounts       []corev1.VolumeMount
+	EnvFromSources     []corev1.EnvFromSource
+	PodSecurityContext *corev1.PodSecurityContext
+	SecurityContext    *corev1.SecurityContext
+}
+
+// Global variable to hold application configuration
+var appConfig *AppConfig
 
 var access *GiteaAccess
 var authToken string
@@ -264,11 +328,113 @@ func setupInformer(stopCh chan struct{}, namespace string) cache.SharedInformer 
 }
 */
 
-// ReadUserFeaturesFromFile reads a UserFeatures instance from a JSON file.
+// Function to load the configuration from a JSON file
+func loadConfig(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var config Config
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+// Custom String method to avoid printing the password
+func (l LDAPConfig) String() string {
+	return fmt.Sprintf("LDAPConfig{Host: %s, Port: %d, Username: %s, BaseDN: %s}", l.Host, l.Port, l.Username, l.BaseDN)
+}
+
+// Function to process features
+func processFeatures(appConfig *AppConfig) error {
+	config := appConfig.Config
+	secretsDir := appConfig.SecretsDir
+
+	for featureName, featureConfig := range config.Features {
+		fmt.Printf("Processing feature: %s\n", featureName)
+		switch featureName {
+		case "ldap":
+			ldapConfig := &LDAPConfig{}
+			// Convert featureConfig (map[string]interface{}) to LDAPConfig
+			configBytes, _ := json.Marshal(featureConfig)
+			if err := json.Unmarshal(configBytes, ldapConfig); err != nil {
+				return fmt.Errorf("failed to parse LDAP configuration: %v", err)
+			}
+			// Load LDAP password from secret
+			ldapSecretPath := filepath.Join(secretsDir, "ldap-password", "password")
+			password, err := os.ReadFile(ldapSecretPath)
+			if err != nil {
+				return fmt.Errorf("failed to read LDAP password from secret: %v", err)
+			}
+			ldapConfig.Password = string(password)
+			// Store ldapConfig in appConfig for later use
+			appConfig.LDAPConfig = ldapConfig
+			// Proceed with LDAP initialization if needed
+			fmt.Println(ldapConfig)
+		default:
+			fmt.Printf("Unknown feature: %s\n", featureName)
+		}
+	}
+	return nil
+}
+
+// InitializeAppConfig initializes the global appConfig variable
+func InitializeAppConfig(configPath, mapsDir, secretsDir string) (*AppConfig, error) {
+	// Load the main configuration
+	config, err := loadConfig(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load configuration: %v", err)
+	}
+
+	// Create the appConfig instance
+	appConfig := &AppConfig{
+		ConfigPath: configPath,
+		MapsDir:    mapsDir,
+		SecretsDir: secretsDir,
+		Config:     config,
+	}
+
+	// Set the TLS certificate paths
+	_, exists := config.Secrets["cert"]
+	if !exists {
+		return nil, fmt.Errorf("TLS certificate secret 'cert' not found in configuration")
+	}
+	tlsSecretDir := filepath.Join(secretsDir, "cert")
+	appConfig.TLSCertPath = filepath.Join(tlsSecretDir, "tls.crt")
+	appConfig.TLSKeyPath = filepath.Join(tlsSecretDir, "tls.key")
+
+	// Process features and update appConfig accordingly
+	if err := processFeatures(appConfig); err != nil {
+		return nil, fmt.Errorf("failed to process features: %v", err)
+	}
+
+	// Initialize Kubernetes client using in-cluster config
+	k8sConfig, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create in-cluster Kubernetes config: %v", err)
+	}
+
+	k8sClient, err := kubernetes.NewForConfig(k8sConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Kubernetes client: %v", err)
+	}
+
+	// Set the Kubernetes client handle in the appConfig
+	appConfig.K8sClient = k8sClient
+
+	log.Println("Kubernetes client successfully initialized")
+
+	return appConfig, nil
+}
+
+// ReadUserProfilesFromFile reads a UserProfiles instance from a JSON file.
 //
 // This function constructs a file path from a directory and basename, checks for
 // the file's existence, and reads its content. It then deserializes the JSON
-// content into a UserFeatures instance. The function handles and returns errors
+// content into a UserProfiles instance. The function handles and returns errors
 // related to file existence, reading, and JSON unmarshalling.
 //
 // Parameters:
@@ -276,13 +442,13 @@ func setupInformer(stopCh chan struct{}, namespace string) cache.SharedInformer 
 // - directory: The directory where the file is located.
 //
 // Returns:
-// - A pointer to a UserFeatures instance.
+// - A pointer to a UserProfiles instance.
 // - An error, nil if the operation is successful.
 //
 // Usage:
 //
-//	features, err := ReadUserFeaturesFromFile(basename, directory)
-func ReadUserFeaturesFromFile(basename, directory string) (*UserFeatures, error) {
+//	features, err := ReadUserProfilesFromFile(basename, directory)
+func ReadUserProfilesFromFile(basename, directory string) (*UserProfiles, error) {
 	filePath := filepath.Join(directory, basename)
 
 	// Check if the file exists
@@ -296,14 +462,99 @@ func ReadUserFeaturesFromFile(basename, directory string) (*UserFeatures, error)
 		return nil, fmt.Errorf("error reading file: %s", err)
 	}
 
-	// Deserialize the JSON content into a UserFeatures instance
-	var features UserFeatures
+	// Deserialize the JSON content into a UserProfiles instance
+	var features UserProfiles
 	err = json.Unmarshal(fileData, &features)
 	if err != nil {
 		return nil, fmt.Errorf("error unmarshalling JSON: %s", err)
 	}
 
 	return &features, nil
+}
+
+func extractCN(dn string) string {
+	parts := strings.Split(dn, ",")
+	for _, part := range parts {
+		if strings.HasPrefix(strings.TrimSpace(part), "cn=") {
+			return strings.TrimPrefix(strings.TrimSpace(part), "cn=")
+		}
+	}
+	return ""
+}
+
+// Example usage within your existing searchLDAP function or another appropriate part of your code:
+// Assuming `groupDNs` is a slice of strings fetched from the `memberOf` attribute
+func extractGroupNames(groupDNs []string) []string {
+	groupCNs := make([]string, len(groupDNs))
+	for i, dn := range groupDNs {
+		groupCNs[i] = extractCN(dn)
+	}
+	return groupCNs
+}
+
+func searchLDAP(username string) (*User, error) {
+	ldapConfig := appConfig.LDAPConfig
+	if ldapConfig == nil {
+		return nil, fmt.Errorf("LDAP configuration not initialized")
+	}
+
+	// Connect to LDAP
+	l, err := ldap.Dial("tcp", fmt.Sprintf("%s:%d", ldapConfig.Host, ldapConfig.Port))
+	if err != nil {
+		return nil, err
+	}
+	defer l.Close()
+
+	// Bind with credentials
+	err = l.Bind(ldapConfig.Username, ldapConfig.Password)
+	if err != nil {
+		return nil, err
+	}
+
+	// Search for the given username
+	searchRequest := ldap.NewSearchRequest(
+		ldapConfig.BaseDN,
+		ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
+		fmt.Sprintf("(uid=%s)", ldap.EscapeFilter(username)),
+		[]string{
+			"uid", "cn", "sn", "givenName", "displayName", "mail",
+			"telephoneNumber", "o", "ou", "runAsUser", "runAsGroup",
+			"fsGroup", "supplementalGroups", "memberOf",
+		},
+		nil,
+	)
+
+	sr, err := l.Search(searchRequest)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(sr.Entries) == 0 {
+		log.Printf("LDAP User not found: %s", username)
+		return nil, nil
+	}
+
+	entry := sr.Entries[0]
+	user := &User{
+		UID:                entry.GetAttributeValue("uid"),
+		CommonName:         entry.GetAttributeValue("cn"),
+		Surname:            entry.GetAttributeValue("sn"),
+		GivenName:          entry.GetAttributeValue("givenName"),
+		DisplayName:        entry.GetAttributeValue("displayName"),
+		Email:              entry.GetAttributeValue("mail"),
+		Telephone:          entry.GetAttributeValue("telephoneNumber"),
+		Organization:       entry.GetAttributeValue("o"),
+		OrganizationalUnit: entry.GetAttributeValue("ou"),
+		RunAsUser:          entry.GetAttributeValue("runAsUser"),
+		RunAsGroup:         entry.GetAttributeValue("runAsGroup"),
+		FsGroup:            entry.GetAttributeValue("fsGroup"),
+		SupplementalGroups: entry.GetAttributeValues("supplementalGroups"),
+		Groups:             extractGroupNames(entry.GetAttributeValues("memberOf")),
+	}
+
+	log.Printf("user: %v", user)
+
+	return user, nil
 }
 
 // ExtractUsernameFromAdmissionReview extracts the 'username' label from a Deployment
@@ -491,6 +742,120 @@ func GetK8sEnvFrom(secretsFrom []SecretRef) []corev1.EnvFromSource {
 	return envFromSources
 }
 
+func constructSecurityContexts(user *User) (*corev1.PodSecurityContext, *corev1.SecurityContext, error) {
+	var podSecurityContext corev1.PodSecurityContext
+	var securityContext corev1.SecurityContext
+
+	// Parse RunAsUser for SecurityContext
+	if user.RunAsUser != "" {
+		runAsUser, err := strconv.ParseInt(user.RunAsUser, 10, 64)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid RunAsUser: %v", err)
+		}
+		securityContext.RunAsUser = &runAsUser
+	}
+
+	// Parse RunAsGroup for SecurityContext
+	if user.RunAsGroup != "" {
+		runAsGroup, err := strconv.ParseInt(user.RunAsGroup, 10, 64)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid RunAsGroup: %v", err)
+		}
+		securityContext.RunAsGroup = &runAsGroup
+	}
+
+	// Parse FsGroup for PodSecurityContext
+	if user.FsGroup != "" {
+		fsGroup, err := strconv.ParseInt(user.FsGroup, 10, 64)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid FsGroup: %v", err)
+		}
+		podSecurityContext.FSGroup = &fsGroup
+	}
+
+	// Parse SupplementalGroups for PodSecurityContext
+	if len(user.SupplementalGroups) > 0 {
+		var supplementalGroups []int64
+		for _, sg := range user.SupplementalGroups {
+			sgInt, err := strconv.ParseInt(sg, 10, 64)
+			if err != nil {
+				log.Printf("Invalid SupplementalGroup '%s': %v", sg, err)
+				continue
+			}
+			supplementalGroups = append(supplementalGroups, sgInt)
+		}
+		podSecurityContext.SupplementalGroups = supplementalGroups
+	}
+
+	return &podSecurityContext, &securityContext, nil
+}
+
+func getPVCsByLabel(clientset *kubernetes.Clientset, groupName, namespace string) ([]corev1.PersistentVolumeClaim, error) {
+	// Define the label selector to filter by the "helx.renci.org/group-name" label
+	labelSelector := fmt.Sprintf("helx.renci.org/group-name=%s", groupName)
+
+	// Get the list of PVCs in the specified namespace with the label selector
+	pvcList, err := clientset.CoreV1().PersistentVolumeClaims(namespace).List(context.Background(), metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if len(pvcList.Items) == 0 {
+		log.Printf("no PVCs found with label helx.renci.org/group-name=%s", groupName)
+	} else if len(pvcList.Items) > 1 {
+		log.Printf("multiple PVCs found with label helx.renci.org/group-name=%s", groupName)
+	}
+
+	return pvcList.Items, nil
+}
+
+// getVolumesAndMountsForUserGroups constructs volumes and volume mounts for the user's groups.
+func getVolumesAndMountsForUserGroups(clientset *kubernetes.Clientset, user *User, namespace string) ([]corev1.Volume, []corev1.VolumeMount, error) {
+	var volumes []corev1.Volume
+	var volumeMounts []corev1.VolumeMount
+
+	for _, groupName := range user.Groups {
+		// Get PVCs labeled with the group name
+		pvcs, err := getPVCsByLabel(clientset, groupName, namespace)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		// If there are PVCs for this group, take the first one
+		if len(pvcs) > 0 {
+			pvc := pvcs[0]
+
+			// Use the PVC name as the volume name
+			volumeName := pvc.Name
+
+			// Create the volume
+			volume := corev1.Volume{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: pvc.Name,
+					},
+				},
+			}
+
+			// Create the volume mount
+			volumeMount := corev1.VolumeMount{
+				Name:      volumeName,
+				MountPath: fmt.Sprintf("/shared/%s", groupName),
+			}
+
+			// Add to the slices
+			volumes = append(volumes, volume)
+			volumeMounts = append(volumeMounts, volumeMount)
+		}
+		// If no PVCs are found, skip this group
+	}
+
+	return volumes, volumeMounts, nil
+}
+
 // printVolumes logs the details of each Volume in the provided slice.
 //
 // This function iterates over a slice of corev1.Volume and logs their details,
@@ -585,24 +950,46 @@ func printPatchOperations(operations []jsonpatch.JsonPatchOperation) {
 	}
 }
 
-func calculatePatch(admissionReview *admissionv1.AdmissionReview, volumes []corev1.Volume, volumeMounts []corev1.VolumeMount, envFromSources []corev1.EnvFromSource) ([]byte, error) {
+// applyResourcesToContainers applies the given resources to each container in the slice.
+func applyResourcesToContainers(containers []corev1.Container, resources ProfileResources) {
+	for i := range containers {
+		container := &containers[i]
+
+		// Add volume mounts
+		container.VolumeMounts = append(container.VolumeMounts, resources.VolumeMounts...)
+
+		// Apply SecurityContext
+		if resources.SecurityContext != nil {
+			container.SecurityContext = resources.SecurityContext
+		}
+
+		// Add envFrom sources
+		container.EnvFrom = append(container.EnvFrom, resources.EnvFromSources...)
+	}
+}
+
+func calculatePatch(admissionReview *admissionv1.AdmissionReview, resources ProfileResources) ([]byte, error) {
 	// Deserialize the original Deployment from the AdmissionReview
 	var originalDeployment appsv1.Deployment
 	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &originalDeployment); err != nil {
 		return nil, err
 	}
 
-	// Apply modifications to the Deployment
+	// Apply modifications to the Deployment by starting with a copy
 	modifiedDeployment := originalDeployment.DeepCopy()
 
-	// Add volumes and volume mounts
-	modifiedDeployment.Spec.Template.Spec.Volumes = append(modifiedDeployment.Spec.Template.Spec.Volumes, volumes...)
-	if len(modifiedDeployment.Spec.Template.Spec.Containers) > 0 {
-		container := &modifiedDeployment.Spec.Template.Spec.Containers[0]
-		container.VolumeMounts = append(container.VolumeMounts, volumeMounts...)
+	// Add volumes
+	modifiedDeployment.Spec.Template.Spec.Volumes = append(modifiedDeployment.Spec.Template.Spec.Volumes, resources.Volumes...)
 
-		// Add envFrom sources to the first container
-		container.EnvFrom = append(container.EnvFrom, envFromSources...)
+	// Apply modifications to the Containers
+	applyResourcesToContainers(modifiedDeployment.Spec.Template.Spec.Containers, resources)
+
+	// Apply modifications to the InitContainers
+	applyResourcesToContainers(modifiedDeployment.Spec.Template.Spec.InitContainers, resources)
+
+	// Apply PodSecurityContext
+	if resources.PodSecurityContext != nil {
+		modifiedDeployment.Spec.Template.Spec.SecurityContext = resources.PodSecurityContext
 	}
 
 	log.Printf("marshalling original new JSON")
@@ -629,20 +1016,43 @@ func calculatePatch(admissionReview *admissionv1.AdmissionReview, volumes []core
 	return patchBytes, nil
 }
 
-func appendFeatures(featureKey string, volumes []corev1.Volume, volumeMounts []corev1.VolumeMount, envFromSources []corev1.EnvFromSource) ([]corev1.Volume, []corev1.VolumeMount, []corev1.EnvFromSource, error) {
-	if userFeatures, err := ReadUserFeaturesFromFile(featureKey, "/etc/user-mutator-maps/user-features"); err != nil {
-		return nil, nil, nil, fmt.Errorf("user feature spec for %s invalid %v", featureKey, err)
-	} else if userFeatures != nil {
-		if specificVolumes, err := GetK8sVolumes(userFeatures.Volumes); err == nil {
-			volumes = append(volumes, specificVolumes...)
-			volumeMounts = append(volumeMounts, GetK8sVolumeMounts(userFeatures.Volumes)...)
-			envFromSources = append(envFromSources, GetK8sEnvFrom(userFeatures.SecretsFrom)...)
-			return volumes, volumeMounts, envFromSources, nil
-		} else {
-			return nil, nil, nil, fmt.Errorf("volume spec for %s invalid %v", featureKey, err)
-		}
+func appendProfiles(featureKey string, resources ProfileResources) (ProfileResources, error) {
+	profilePath := filepath.Join(appConfig.MapsDir, "user_profiles")
+
+	userProfiles, err := ReadUserProfilesFromFile(featureKey, profilePath)
+	if err != nil {
+		return resources, fmt.Errorf("user feature spec for %s invalid: %v", featureKey, err)
 	}
-	return volumes, volumeMounts, envFromSources, nil
+	if userProfiles != nil {
+		specificVolumes, err := GetK8sVolumes(userProfiles.Volumes)
+		if err != nil {
+			return resources, fmt.Errorf("volume spec for %s invalid: %v", featureKey, err)
+		}
+		resources.Volumes = append(resources.Volumes, specificVolumes...)
+		resources.VolumeMounts = append(resources.VolumeMounts, GetK8sVolumeMounts(userProfiles.Volumes)...)
+		resources.EnvFromSources = append(resources.EnvFromSources, GetK8sEnvFrom(userProfiles.SecretsFrom)...)
+	}
+	return resources, nil
+}
+
+func setSecurityContexts(user *User, resources ProfileResources) (ProfileResources, error) {
+	podSecurityContext, securityContext, err := constructSecurityContexts(user)
+	if err != nil {
+		return resources, fmt.Errorf("failed to construct security contexts: %v", err)
+	}
+	resources.PodSecurityContext = podSecurityContext
+	resources.SecurityContext = securityContext
+	return resources, nil
+}
+
+func addGroupsToProfile(clientset *kubernetes.Clientset, user *User, namespace string, resources ProfileResources) (ProfileResources, error) {
+	volumes, volumeMounts, err := getVolumesAndMountsForUserGroups(clientset, user, namespace)
+	if err != nil {
+		return resources, fmt.Errorf("could not detect group PVCs for user %s: %v", user.UID, err)
+	}
+	resources.Volumes = append(resources.Volumes, volumes...)
+	resources.VolumeMounts = append(resources.VolumeMounts, volumeMounts...)
+	return resources, nil
 }
 
 func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
@@ -659,24 +1069,28 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 
 	if username, err := ExtractUsernameFromAdmissionReview(admissionReview); err == nil {
 		log.Printf("deployment is for user = %s", username)
-		var volumes []corev1.Volume
-		var volumeMounts []corev1.VolumeMount
-		var envFromSources []corev1.EnvFromSource
-		var err error
 
-		if volumes, volumeMounts, envFromSources, err = appendFeatures("auto", volumes, volumeMounts, envFromSources); err != nil {
+		var err error
+		resources := ProfileResources{Volumes: []corev1.Volume{}, VolumeMounts: []corev1.VolumeMount{}, EnvFromSources: []corev1.EnvFromSource{}}
+
+		if resources, err = appendProfiles("auto", resources); err != nil {
 			log.Printf("failed to add auto features %v", err)
-			return &admissionv1.AdmissionResponse{
-				UID:     admissionReview.Request.UID,
-				Allowed: true,
-			}
 		}
 
-		if volumes, volumeMounts, envFromSources, err = appendFeatures(username+".json", volumes, volumeMounts, envFromSources); err != nil {
+		if resources, err = appendProfiles(username+".json", resources); err != nil {
 			log.Printf("failed to add user features %v", err)
-			return &admissionv1.AdmissionResponse{
-				UID:     admissionReview.Request.UID,
-				Allowed: true,
+		}
+
+		// Search LDAP for user information
+		user, err := searchLDAP(username)
+		if err != nil {
+			log.Printf("Failed to retrieve user from LDAP: %v", err)
+		} else {
+			if resources, err = setSecurityContexts(user, resources); err != nil {
+				log.Printf("Failed to construct security contexts: %v", err)
+			}
+			if resources, err = addGroupsToProfile(appConfig.K8sClient, user, admissionReview.Request.Namespace, resources); err != nil {
+				log.Printf("Failed to add group volumes: %v", err)
 			}
 		}
 
@@ -685,7 +1099,7 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 		//printVolumeMounts(volumeMounts)
 
 		// Calculate the patch
-		if patchBytes, err := calculatePatch(&admissionReview, volumes, volumeMounts, envFromSources); err != nil {
+		if patchBytes, err := calculatePatch(&admissionReview, resources); err != nil {
 			log.Printf("Patch creation failed %v", err)
 		} else {
 			return &admissionv1.AdmissionResponse{
@@ -780,13 +1194,26 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	var err error
+
+	// Paths
+	configPath := "/etc/user-mutator-config/config.json"
+	mapsDir := "/etc/user-mutator-maps"
+	secretsDir := "/etc/user-mutator-secrets"
+
+	// Initialize the global appConfig
+	if appConfig, err = InitializeAppConfig(configPath, mapsDir, secretsDir); err != nil {
+		log.Fatalf("Initialization error: %v", err)
+	}
+
 	r := mux.NewRouter()
 	r.HandleFunc("/mutate", handleAdmissionReview)
 	r.HandleFunc("/readyz", readinessHandler)
 	r.HandleFunc("/healthz", livenessHandler)
 	http.Handle("/", r)
 	log.Println("Server started on :8443")
-	if err := http.ListenAndServeTLS(":8443", "/etc/user-mutator-secrets/user-mutator-cert-tls/tls.crt", "/etc/user-mutator-secrets/user-mutator-cert-tls/tls.key", nil); err != nil {
+
+	if err := http.ListenAndServeTLS(":8443", appConfig.TLSCertPath, appConfig.TLSKeyPath, nil); err != nil {
 		log.Printf("Failed to start server: %v", err)
 	}
 }
