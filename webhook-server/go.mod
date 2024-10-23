@@ -1,12 +1,13 @@
 module user_mutator
 
-go 1.22.0
+go 1.23.0
 
 toolchain go1.23.2
 
 require (
 	github.com/gorilla/mux v1.8.1
 	k8s.io/api v0.31.1
+	k8s.io/apimachinery v0.31.1
 	k8s.io/client-go v0.31.1
 )
 
@@ -36,7 +37,6 @@ require (
 	golang.org/x/time v0.3.0 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	k8s.io/apimachinery v0.31.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20240228011516-70dd3763d340 // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
 )
