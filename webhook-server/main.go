@@ -87,10 +87,17 @@ type User struct {
 	FsGroup            string   `json:"fsGroup,omitempty"`
 	SupplementalGroups []string `json:"supplementalGroups,omitempty"`
 	Groups             []string `json:"groups,omitempty"`
+
+	// posixAccount fields
+	UIDNumber     string `json:"uidNumber,omitempty"`
+	GIDNumber     string `json:"gidNumber,omitempty"`
+	HomeDirectory string `json:"homeDirectory,omitempty"`
+	LoginShell    string `json:"loginShell,omitempty"`
 }
 
 // Struct for the main configuration
 type Config struct {
+	Meta     map[string]string      `json:"meta"`
 	Features map[string]interface{} `json:"features"`
 	Maps     map[string]string      `json:"maps"`
 	Secrets  map[string]string      `json:"secrets"`
@@ -98,11 +105,12 @@ type Config struct {
 
 // Struct for LDAP configuration
 type LDAPConfig struct {
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Username string `json:"username"`
-	Password string `json:"-"`
-	BaseDN   string `json:"baseDN"`
+	Host                    string `json:"host"`
+	Port                    int    `json:"port"`
+	Username                string `json:"username"`
+	Password                string `json:"-"`
+	BaseDN                  string `json:"base_dn"`
+	LibNSSLDAPConfigMapName string `json:libnss_ldap_config_map_name`
 }
 
 // AppConfig struct holds paths and loaded configuration
@@ -115,7 +123,6 @@ type AppConfig struct {
 	TLSKeyPath  string
 	LDAPConfig  *LDAPConfig
 	K8sClient   *kubernetes.Clientset // Add Kubernetes client handle
-
 }
 
 type ProfileResources struct {
@@ -345,7 +352,7 @@ func loadConfig(path string) (*Config, error) {
 
 // Custom String method to avoid printing the password
 func (l LDAPConfig) String() string {
-	return fmt.Sprintf("LDAPConfig{Host: %s, Port: %d, Username: %s, BaseDN: %s}", l.Host, l.Port, l.Username, l.BaseDN)
+	return fmt.Sprintf("LDAPConfig{Host: %s, Port: %d, Username: %s, BaseDN: %s, ConfigMapName: %s}", l.Host, l.Port, l.Username, l.BaseDN, l.LibNSSLDAPConfigMapName)
 }
 
 // Function to process features
@@ -372,6 +379,14 @@ func processFeatures(appConfig *AppConfig) error {
 			ldapConfig.Password = string(password)
 			// Store ldapConfig in appConfig for later use
 			appConfig.LDAPConfig = ldapConfig
+			if appConfig.LDAPConfig.Port == 0 {
+				appConfig.LDAPConfig.Port = 389
+			}
+			libNSLDAPConfigMapName, nssConfigmapfound := config.Meta["libnss_ldap_config_map_name"]
+			if nssConfigmapfound {
+				appConfig.LDAPConfig.LibNSSLDAPConfigMapName = libNSLDAPConfigMapName
+			}
+
 			// Proceed with LDAP initialization if needed
 			fmt.Println(ldapConfig)
 		default:
@@ -520,6 +535,8 @@ func searchLDAP(username string) (*User, error) {
 			"uid", "cn", "sn", "givenName", "displayName", "mail",
 			"telephoneNumber", "o", "ou", "runAsUser", "runAsGroup",
 			"fsGroup", "supplementalGroups", "memberOf",
+			// posixAccount attributes
+			"uidNumber", "gidNumber", "homeDirectory", "loginShell",
 		},
 		nil,
 	)
@@ -550,6 +567,12 @@ func searchLDAP(username string) (*User, error) {
 		FsGroup:            entry.GetAttributeValue("fsGroup"),
 		SupplementalGroups: entry.GetAttributeValues("supplementalGroups"),
 		Groups:             extractGroupNames(entry.GetAttributeValues("memberOf")),
+
+		// posixAccount attributes
+		UIDNumber:     entry.GetAttributeValue("uidNumber"),
+		GIDNumber:     entry.GetAttributeValue("gidNumber"),
+		HomeDirectory: entry.GetAttributeValue("homeDirectory"),
+		LoginShell:    entry.GetAttributeValue("loginShell"),
 	}
 
 	log.Printf("user: %v", user)
@@ -753,11 +776,23 @@ func constructSecurityContexts(user *User) (*corev1.PodSecurityContext, *corev1.
 			return nil, nil, fmt.Errorf("invalid RunAsUser: %v", err)
 		}
 		securityContext.RunAsUser = &runAsUser
+	} else if user.UIDNumber != "" {
+		runAsUser, err := strconv.ParseInt(user.UIDNumber, 10, 64)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid RunAsUser: %v", err)
+		}
+		securityContext.RunAsUser = &runAsUser
 	}
 
 	// Parse RunAsGroup for SecurityContext
 	if user.RunAsGroup != "" {
 		runAsGroup, err := strconv.ParseInt(user.RunAsGroup, 10, 64)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid RunAsGroup: %v", err)
+		}
+		securityContext.RunAsGroup = &runAsGroup
+	} else if user.GIDNumber != "" {
+		runAsGroup, err := strconv.ParseInt(user.GIDNumber, 10, 64)
 		if err != nil {
 			return nil, nil, fmt.Errorf("invalid RunAsGroup: %v", err)
 		}
@@ -786,6 +821,12 @@ func constructSecurityContexts(user *User) (*corev1.PodSecurityContext, *corev1.
 		}
 		podSecurityContext.SupplementalGroups = supplementalGroups
 	}
+
+	// Set the FOWNER capability in the security context
+	if securityContext.Capabilities == nil {
+		securityContext.Capabilities = &corev1.Capabilities{}
+	}
+	securityContext.Capabilities.Add = append(securityContext.Capabilities.Add, corev1.Capability("CHOWN"))
 
 	return &podSecurityContext, &securityContext, nil
 }
@@ -854,6 +895,36 @@ func getVolumesAndMountsForUserGroups(clientset *kubernetes.Clientset, user *Use
 	}
 
 	return volumes, volumeMounts, nil
+}
+
+func getLDAPConfigVolumesAndMounts(configMapName string) ([]corev1.Volume, []corev1.VolumeMount) {
+	volumes := []corev1.Volume{
+		{
+			Name: "libnss-ldap-config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: configMapName,
+					},
+				},
+			},
+		},
+	}
+
+	volumeMounts := []corev1.VolumeMount{
+		{
+			Name:      "libnss-ldap-config",
+			MountPath: "/etc/libnss-ldap.conf",
+			SubPath:   "libnss-ldap.conf",
+		},
+		{
+			Name:      "libnss-ldap-config",
+			MountPath: "/etc/nsswitch.conf",
+			SubPath:   "nsswitch.conf",
+		},
+	}
+
+	return volumes, volumeMounts
 }
 
 // printVolumes logs the details of each Volume in the provided slice.
@@ -1055,6 +1126,13 @@ func addGroupsToProfile(clientset *kubernetes.Clientset, user *User, namespace s
 	return resources, nil
 }
 
+func addLibNSSLDAPConfigToProfile(configMapName string, resources ProfileResources) ProfileResources {
+	volumes, volumeMounts := getLDAPConfigVolumesAndMounts(configMapName)
+	resources.Volumes = append(resources.Volumes, volumes...)
+	resources.VolumeMounts = append(resources.VolumeMounts, volumeMounts...)
+	return resources
+}
+
 func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	// Implement your logic here
 	// For example, always allow the request:
@@ -1091,6 +1169,9 @@ func processAdmissionReview(admissionReview admissionv1.AdmissionReview) *admiss
 			}
 			if resources, err = addGroupsToProfile(appConfig.K8sClient, user, admissionReview.Request.Namespace, resources); err != nil {
 				log.Printf("Failed to add group volumes: %v", err)
+			}
+			if appConfig.LDAPConfig.LibNSSLDAPConfigMapName != "" {
+				resources = addLibNSSLDAPConfigToProfile(appConfig.LDAPConfig.LibNSSLDAPConfigMapName, resources)
 			}
 		}
 
