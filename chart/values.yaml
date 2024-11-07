@@ -96,7 +96,8 @@ affinity: {}
 #      host: "ldap.example.org"
 #      port: 389
 #      username: "cn=admin,dc=example,dc=org"
-#      base_dn: "ou=users,dc=example,dc=org"
+#      user_base_dn: "ou=users,dc=example,dc=org"
+#      group_base_dn: "ou=groups,dc=example,dc=org"
 #  secrets:
 #    ldap-password: <ldapSecret>
 

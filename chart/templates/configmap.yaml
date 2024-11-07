@@ -34,8 +34,8 @@ metadata:
 data:
   libnss-ldap.conf: |
     uri ldap://{{ .Values.config.features.ldap.host }}{{if .Values.config.features.ldap.port }}:{{ .Values.config.features.ldap.port }}{{ end }}
-    base {{ .Values.config.features.ldap.base_dn }}
-    nss_base_group ou=groups,dc=example,dc=org
+    base {{ .Values.config.features.ldap.user_base_dn }}
+    nss_base_group {{ .Values.config.features.ldap.group_base_dn }}
     ldap_version 3
     ssl off
     pam_password md5
