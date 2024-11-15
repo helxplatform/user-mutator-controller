@@ -915,7 +915,7 @@ func constructSecurityContexts(user *User) (*corev1.PodSecurityContext, *corev1.
 	if securityContext.Capabilities == nil {
 		securityContext.Capabilities = &corev1.Capabilities{}
 	}
-	securityContext.Capabilities.Add = append(securityContext.Capabilities.Add, corev1.Capability("CHOWN"))
+	//securityContext.Capabilities.Add = append(securityContext.Capabilities.Add, corev1.Capability("CHOWN"))
 
 	return &podSecurityContext, &securityContext, nil
 }
