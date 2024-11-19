@@ -8,7 +8,7 @@ image:
   repository: containers.renci.org/helxplatform/user-mutator
   pullPolicy: Always
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "latest"
+  tag:
 
 imagePullSecrets: []
 nameOverride: ""
@@ -93,11 +93,14 @@ affinity: {}
 #
 #  features:
 #    ldap:
-#      host: "ldap.example.com"
+#      host: "ldap.example.org"
 #      port: 389
-#      username: "admin"
+#      username: "cn=admin,dc=example,dc=org"
+#      user_base_dn: "ou=users,dc=example,dc=org"
+#      group_base_dn: "ou=groups,dc=example,dc=org"
 #  secrets:
-#    ldapPassword: <ldappw>
+#    ldap-password: <ldapSecret>
+
 
 config:
   enabled: true
